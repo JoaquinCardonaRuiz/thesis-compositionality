@@ -1,2 +1,4 @@
 # LEAR
-Repo for our ACL finding paper [Learning Algebraic Recombination for Compositional Generalization](https://arxiv.org/abs/2107.06516)
+
+Forked from https://github.com/thousfeet/LEAR 
+Modified for reproduction and extension under thesis work.
