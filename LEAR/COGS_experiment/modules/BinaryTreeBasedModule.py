@@ -49,6 +49,19 @@ class BinaryTreeBasedModule(nn.Module):
         raise NotImplementedError
 
     def _transform_leafs(self, x, mask):
+        """ Transforms token embeddings to the correct shape for the TreeLSTM. 
+        
+        The transformation depends on the type of leaf transformation used in the model.
+        The possible transformations are:
+        - no_transformation: no transformation is applied, the input is used as is.
+        - lstm_transformation: a single LSTM is applied to the input.
+        - bi_lstm_transformation: a bidirectional LSTM is applied to the input.
+        - conv_transformation: a convolutional layer is applied to the input.
+
+        The input is expected to be of shape (batch_size, seq_len, input_dim), where input_dim is the dimension of the token embeddings.
+        There are two outputs: the hidden state (h) and the cell state (c) of the LSTM.
+        
+        """
         if self.leaf_transformation == BinaryTreeBasedModule.no_transformation:
             pass
         elif self.leaf_transformation == BinaryTreeBasedModule.lstm_transformation:
@@ -64,6 +77,10 @@ class BinaryTreeBasedModule(nn.Module):
             x = self.conv2(x)
             x = torch.tanh(x)
             x = x.permute(0, 2, 1)
+
+        # Apply linear projection to the transformed input to get the hidden and cell states
+        # the output is split arbitrarily into two parts, which are used as the hidden and cell states of the TreeLSTM
+        # the model then learns to use them as it sees fit
         return self.linear(x).tanh().chunk(chunks=2, dim=-1)
 
     @staticmethod

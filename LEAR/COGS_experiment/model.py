@@ -249,13 +249,22 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
     def forward(self, pair, x, bottom_span_batch, span2output_token_batch,
                 relaxed=False, tau_weights=None, straight_through=False, noise=None,
                 eval_actions=None, eval_sr_actions=None, eval_swr_actions=None, debug_info=None):
-
+        """ Forward pass of the Composer Model.
+        
+        Uses the tree-structured LSTM to compose the bottom abstractions into a binary tree structure.
+        The model is trained using reinforcement learning to maximize the expected reward of the generated tree structure.
+        """
+        # several identical inputs are passed to the model in each batch
         batch_size = len(bottom_span_batch)
 
         span2variable_batch = [{} for _ in range(batch_size)]
 
+        # each input has the same length
         length_ori = len(x[0])
 
+        # reconstruct the bottom spans to a dictionary
+        # from [[[1,1], "cake"], [[3,3], "cook"]]
+        # to {"[1, 1]": "cake", "[3, 3]": "cook"}
         span2output_token_dict_batch = []
         for span2output_token in span2output_token_batch:
             span2output_token_dict = {}
@@ -263,6 +272,7 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                 span2output_token_dict[str(span_token[0])] = span_token[1]
             span2output_token_dict_batch.append(span2output_token_dict)
 
+        # pre-compute the leaf embeddings of x1 and x2
         if USE_CUDA:
             single_mask = torch.tensor([[1.]]).cuda()
             h_x1, c_x1 = self._transform_leafs(self.embd_parser(torch.tensor([[x1_token]]).cuda()), mask=single_mask)
@@ -274,6 +284,8 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
 
         span_start_end = [[i, i] for i in range(length_ori)]
         span_start_end_batch = [span_start_end for _ in range(batch_size)]
+        # span_start_end is a list of pairs [[0,0], [1,1], [2,2], ...]
+        # span_start_end_batch is span_start_end for each batch
 
         for in_batch_idx in range(batch_size):
             bottom_span_batch[in_batch_idx].sort(key=lambda span: span[0], reverse=True)
@@ -281,31 +293,52 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
         var_normalized_entropy = []
         var_log_prob = []
 
+        # get the leaf embeddings of the input sequence (all tokens)
+        # this will be a matrix of shape (batch_size, length_ori, input_dim)
         x_embedding = self.embd_parser(x)
         x_embedding = x_embedding.expand(batch_size, x_embedding.shape[1], x_embedding.shape[2])
         mask = torch.ones((x_embedding.shape[0], x_embedding.shape[1]), dtype=torch.float32)
         if USE_CUDA:
             mask = mask.cuda()
+
+        # next, we get the leaf embeddings of the input sequence (all tokens)
+        # this will be a hidden state and a cell state for each token in the input sequence
         hidden_1, cell_1 = self._transform_leafs(x_embedding, mask)
 
+        # we loop over every batch of the input
+        # every batch is identical, but reinforcement learning samples different possible merge actions in each batch
         for in_batch_idx in range(batch_size):
             bottom_span = bottom_span_batch[in_batch_idx]
+            # we sort so that changes do not affect later indices
             bottom_span.sort(key=lambda span: span[0], reverse=True)
             span_start_end = span_start_end_batch[in_batch_idx]
+
             for span in bottom_span:
+                # this line keeps span_start_end identical, but replaces the object with the same index
+                # as our current span with the actual span object we're looking at, so modifications to it
+                # will be reflected in span_start_end
                 span_start_end = span_start_end[:span[0]] + [span] + span_start_end[span[1] + 1:]
+
                 span_start_end_batch[in_batch_idx] = span_start_end
+
+                # the model does not support multiple tokens in a span
                 assert span[1] - span[0] == 0
 
+                # we get the token the span represents
                 span2output_token_dict = span2output_token_dict_batch[in_batch_idx]
                 token = span2output_token_dict[str(span)]
+                # check if it is in the vocab
                 assert token in self.entity_list + self.predicate_list
 
+                # replace bottom spans (meaning-carrying words) with abstract variables (x1 or x2)
                 if token in self.entity_list:
                     h_x, c_x = h_x1, c_x1
                 else:
                     h_x, c_x = h_x2, c_x2
 
+                # we've replaced the current span with the abstract variable
+                # so we need to update the hidden and cell states
+                # new_hidden = [before_span] + [h_x] + [after_span]
                 hidden_1_one_batch = torch.cat(
                     [hidden_1[in_batch_idx:in_batch_idx + 1, :span[0], :],
                      h_x,
@@ -315,6 +348,8 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                      c_x,
                      cell_1[in_batch_idx:in_batch_idx + 1, span[1] + 1:, :]], dim=1)
 
+                # we need to update the hidden and cell states for the entire batch
+                # so we insert the new hidden and cell states for the current batch into the array of all batches
                 hidden_1 = torch.cat([hidden_1[:in_batch_idx], hidden_1_one_batch, hidden_1[in_batch_idx + 1:]], dim=0)
                 cell_1 = torch.cat([cell_1[:in_batch_idx], cell_1_one_batch, cell_1[in_batch_idx + 1:]], dim=0)
 
@@ -340,6 +375,7 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
         if USE_CUDA:
             mask = mask.cuda()
 
+        # Merge spans
         for i in range(1, x_embedding.shape[1]):
             # pdb.set_trace()
             noise = None
@@ -851,19 +887,28 @@ class HRLModel(nn.Module):
 
     def _forward(self, pair, x, sample_num, epoch, is_test, debug_info):
         assert x.size(1) > 1
+        # [A] [cake] [was] [cooked] [by] [the] [scientist]
 
         bottom_span = self.abstractor(x)
+        # [[1, 1], [3, 3], [6, 6]]
+        # Corresponding to: cake, cooked, scientist
 
         span2output_token = self.classifier(x, bottom_span)
+        # [[[1, 1], "cake"], [[3, 3], "cook"], [[6, 6], "scientist"]]
 
+        # repeat sample_num (10) times to explore different trees
         bottom_span_batch = [bottom_span for _ in range(sample_num)]
         span2output_token_batch = [span2output_token for _ in range(sample_num)]
 
+        # tree_rl_info has one entry per sample of the batch
+        # it contains the normalized entropy, log prob, parent-child spans (the merges that were made) and span2repre (embeddings of snaps)
+        # span2variable_batch contains a mapping of the abstracted spans ([1, 1]) to the tokens (cake, cooked, scientist)
         tree_rl_info, span2variable_batch = self.composer(pair, x, bottom_span_batch, span2output_token_batch)
         tree_normalized_entropy, tree_log_prob, parent_child_spans_batch, span2repre_batch = tree_rl_info
 
         batch_forward_info = []
 
+        # we iterate over samples, and apply semantic composition
         for in_batch_idx in range(sample_num):
             parent_child_spans = parent_child_spans_batch[in_batch_idx]
             span2repre = span2repre_batch[in_batch_idx]

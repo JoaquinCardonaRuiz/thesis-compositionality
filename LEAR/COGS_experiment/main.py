@@ -99,10 +99,10 @@ def data_file_process(file):
 def read_data(lang1, lang2, task_name):
     print("Reading dataset from task {}...".format(task_name))
 
-    file_train = 'cogs_data/train.tsv'
-    file_dev = 'cogs_data/dev.tsv'
-    file_test = 'cogs_data/test.tsv'
-    file_gen = 'cogs_data/gen.tsv'
+    file_train = f'{task_name}_data/train.tsv'
+    file_dev = f'{task_name}_data/dev.tsv'
+    file_test = f'{task_name}_data/test.tsv'
+    file_gen = f'{task_name}_data/gen.tsv'
 
     pairs_train = data_file_process(file_train)
     pairs_dev = data_file_process(file_dev)
@@ -117,8 +117,15 @@ def read_data(lang1, lang2, task_name):
 def prepare_dataset(lang1, lang2, task_name):
     global input_lang
     global output_lang
-    assert task_name == "cogs"
+    assert task_name == "cogs" or task_name == "slog"
+    print(f"Preparing dataset for task {task_name}...")
     input_lang, output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen = read_data(lang1, lang2, task_name)
+
+    # Dynamically build vocab from the actual dataset (SLOG or COGS)
+    for pair in pairs_train + pairs_dev + pairs_test + pairs_gen:
+        input_lang.index_words(pair[0])
+        output_lang.index_words(pair[1])
+
 
     encode_token_filename = './preprocess/encode_tokens.txt'
     with open(encode_token_filename, 'r') as f:
@@ -827,7 +834,7 @@ if __name__ == "__main__":
                                  "Otherwise it is the weight path to be loaded.")
     arg_parser.add_argument("--task", required=True, type=str,
                             choices=["addjump", "around_right", "simple", "length",
-                                     "extend", "mcd1", "mcd2", "mcd3", "cfq", "cogs"],
+                                     "extend", "mcd1", "mcd2", "mcd3", "cfq", "cogs", "slog"],
                             help="All tasks on SCAN, the task name is used to load train or test file")
     arg_parser.add_argument("--random-seed", required=False, default=2, type=int)
 
