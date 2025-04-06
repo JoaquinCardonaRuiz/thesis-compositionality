@@ -89,11 +89,14 @@ class BinaryTreeBasedModule(nn.Module):
         This method merges left and right TreeLSTM states. It reuses already precomputed states for the parent node,
         but still, has to apply correct masking.
         """
+        # create masks for left and right children
         cumsum = torch.cumsum(actions, dim=-1)
-        mask_l = (1.0 - cumsum)[..., None]
-        mask_r = (cumsum - actions)[..., None]
-        mask = mask[..., None]
-        actions = actions[..., None]
+        mask_l = (1.0 - cumsum)[..., None]      # 1 before the merge
+        mask_r = (cumsum - actions)[..., None]  # 1 after the merge
+        mask = mask[..., None]                  # 1 for non-padding spans
+        actions = actions[..., None]            # 1 for the current merge action
+
+        # new states combine the old states multiplied by the masks
         h_p = (mask_l * h_l + actions * h_p + mask_r * h_r) * mask + h_l * (1. - mask)
         c_p = (mask_l * c_l + actions * c_p + mask_r * c_r) * mask + c_l * (1. - mask)
         return h_p, c_p

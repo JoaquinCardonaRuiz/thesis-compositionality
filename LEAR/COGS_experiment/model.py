@@ -305,8 +305,8 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
         # this will be a hidden state and a cell state for each token in the input sequence
         hidden_1, cell_1 = self._transform_leafs(x_embedding, mask)
 
-        # we loop over every batch of the input
-        # every batch is identical, but reinforcement learning samples different possible merge actions in each batch
+        # we loop over every sample of the batch
+        # every sample in the batch identical, but reinforcement learning samples different possible merge actions in each one
         for in_batch_idx in range(batch_size):
             bottom_span = bottom_span_batch[in_batch_idx]
             # we sort so that changes do not affect later indices
@@ -349,53 +349,84 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                      cell_1[in_batch_idx:in_batch_idx + 1, span[1] + 1:, :]], dim=1)
 
                 # we need to update the hidden and cell states for the entire batch
-                # so we insert the new hidden and cell states for the current batch into the array of all batches
+                # so we insert the new hidden and cell states for the current sample into the array of all samples
                 hidden_1 = torch.cat([hidden_1[:in_batch_idx], hidden_1_one_batch, hidden_1[in_batch_idx + 1:]], dim=0)
                 cell_1 = torch.cat([cell_1[:in_batch_idx], cell_1_one_batch, cell_1[in_batch_idx + 1:]], dim=0)
 
         hidden, cell = hidden_1, cell_1
 
+        # tracks which spans have been abstracted into x1 or x2
+        # if span_start_end looks like [[0,0], [1,1], [2,2], [3,3], [4,4]]
+        # and our bottom_span (meaning carrying spans) is [[1,1], [3,3]]
+        # then reduce_span_in_all_span looks like [ [], [ [1,1] ], [], [ [3,3] ], [] ]
         reduce_span_in_all_span_batch = [[] for _ in range(batch_size)]
         for in_batch_idx in range(batch_size):
             bottom_span = bottom_span_batch[in_batch_idx]
             span_start_end = span_start_end_batch[in_batch_idx]
             for span in span_start_end:
                 if span in bottom_span:
+                    # is abstracted
                     reduce_span_in_all_span_batch[in_batch_idx].append([span])
                 else:
+                    # is not meaning carrying
                     reduce_span_in_all_span_batch[in_batch_idx].append([])
 
+        # we need to keep track of the parent-child relationship between spans
+        # parent_child_spans_batch will contain list of pairs like [ [2,5] , [[2,3], [4,5]]]
+        # where [2,5] is the parent span and [[2,3], [4,5]] are the child spans
         parent_child_spans_batch = [[] for _ in range(batch_size)]
+
+        # this will contain the hidden states of the spans that have been abstracted into x1 or x2
+        # it will be used by the solver to generate the final output
         span2repre_batch = [{} for _ in range(batch_size)]
 
+        # this will store values for reinforcement learning
+        # normalized entropy represents the uncertainty of the model
+        # log_prob represents the log probability of the actions taken by the model
         normalized_entropy = []
         log_prob = []
 
+        # masks for cuda, this is not used
         mask = torch.ones((batch_size, length_ori), dtype=torch.float32)
         if USE_CUDA:
             mask = mask.cuda()
 
-        # Merge spans
+        # Main merge loop
+        # Here we will merge the spans into a binary tree structure
         for i in range(1, x_embedding.shape[1]):
+            # we iterate over seq_len - 1, because we need to merge 2 spans at a time
+
             # pdb.set_trace()
             noise = None
             ev_actions = None
 
+            # we use make_step to compute all adjacent pairs of spans, use the tree lstm to get a proposed parent for each pair
+            # score them using the learned vector q, and sample an action from the categorical distribution
             cat_distr, _, actions, hidden, cell = self._make_step(hidden, cell, mask[:, i:],
                                                                   relaxed, tau_weights,
                                                                   straight_through, noise,
                                                                   ev_actions)
-
+            
+            # choose the action with the highest score and get the hidden state of the parent span
             actions_idx = actions.argmax(dim=1)
             hidden_parent = hidden[torch.arange(hidden.shape[0]), actions_idx]  # batch_size * hidden_size
+
+            # label the parent span as either a predicate or an entity
+            # [1, 0] -> entity, [0, 1] -> predicate
             var_cat_distr, _, var_actions = self._var_make_step(hidden_parent, relaxed,
                                                                 tau_weights,
                                                                 straight_through, noise,
                                                                 ev_actions)
 
             reduce_list = []
-            for in_batch_idx in range(batch_size):
 
+            # update the tree and span state
+            for in_batch_idx in range(batch_size):
+                
+                # select the action with the highest score
+                # and update the span_start_end_batch and reduce_span_in_all_span_batchs
+                # so  if  we're merging spans [2,3] + [4,4] → new span is [2,4]
+                # wee update span_start_end_batch to be [ [0,0], [1,1], [2,4], [5,5] ...]
                 action_idx = actions[in_batch_idx].argmax().item()
                 span_start_end = span_start_end_batch[in_batch_idx]
                 merged_span = [span_start_end[action_idx][0], span_start_end[action_idx + 1][1]]
@@ -403,13 +434,15 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                 span_start_end_batch[in_batch_idx] = \
                     span_start_end[:action_idx] + [merged_span] + span_start_end[action_idx + 2:]
 
+                # next, we keep track of the spans that have been abstracted into x1 or x2
+                # to determine if our new span is an abstracted span or not
                 reduce_span_in_all_span = reduce_span_in_all_span_batch[in_batch_idx]
                 reduce_span = reduce_span_in_all_span[action_idx] + reduce_span_in_all_span[action_idx + 1]
                 # update original reduce_span_in_all_span_batch
                 reduce_span_in_all_span_batch[in_batch_idx] = \
                     reduce_span_in_all_span[:action_idx] + [reduce_span] + reduce_span_in_all_span[action_idx + 2:]
 
-                # If a span contains 2 reduced spans, this span will be reduced
+                # If both children of the parent span are abstracted, we also abstract the parent span
                 if len(reduce_span) >= 2:
                     assert len(reduce_span) == 2
                     reduce_list.append(in_batch_idx)
@@ -417,6 +450,7 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                     span2repre_batch[in_batch_idx][str(merged_span)] = \
                         hidden[in_batch_idx:in_batch_idx + 1, action_idx]
 
+                    # we abstract the parent span according to the classifiers output
                     if var_actions[in_batch_idx, 0] == 1:
                         h_x, c_x = h_x1, c_x1
                         span2variable_batch[in_batch_idx][str(merged_span)] = 'entity'
@@ -424,20 +458,27 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                         assert var_actions[in_batch_idx, 1] == 1
                         h_x, c_x = h_x2, c_x2
                         span2variable_batch[in_batch_idx][str(merged_span)] = 'predicate'
+
                     # pdb.set_trace()
+
+                    # we replace the embeddings of our new span with the embeddings of the abstracted variable
                     hidden, cell = self.abst_embed(hidden, cell, h_x, c_x, in_batch_idx, action_idx)
 
+                    # parent_child_span is [parent, children], [[2,4], [[2,2], [4,4]]]
                     parent_child_span = [merged_span, reduce_span]
                     parent_child_spans_batch[in_batch_idx].append(parent_child_span)
 
+            # masks for only the samples which have performed an abstraction on a merged span
             reduce_mask = [1 if i in reduce_list else 0 for i in range(batch_size)]
             reduce_mask = torch.tensor(reduce_mask, dtype=torch.float32)
             if USE_CUDA:
                 reduce_mask = reduce_mask.cuda()
 
+            # update a list of normalised entropies and log probabilities for the actions taken
             normalized_entropy.append(cat_distr.normalized_entropy)
             log_prob.append(-cat_distr.log_prob(actions))
 
+            # idem for the variable classifier, using mask
             var_normalized_entropy.append(var_cat_distr.normalized_entropy * reduce_mask)
             var_log_prob.append(-var_cat_distr.log_prob(var_actions) * reduce_mask)
 
@@ -448,11 +489,17 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
 
         assert relaxed is False
 
+        # entropy, log_prob, the structure of the tree, and the vector repr of each span
         tree_rl_infos = [normalized_entropy, log_prob, parent_child_spans_batch, span2repre_batch]
 
+        # token repr of the spans that have been abstracted into x1 or x2
         return tree_rl_infos, span2variable_batch
 
     def abst_embed(self, hidden, cell, h_x, c_x, in_batch_idx, action_idx):
+        """ Replace the hidden and cell states of a span that has been abstracted.
+        
+        Replaces the hidden and cell states of the span with the hidden and cell states of the abstracted variable.
+        """
         # replace the abstrat with certain variable (x1 or x2)
         h_p_new = torch.cat([hidden[in_batch_idx:in_batch_idx + 1, :action_idx],
                              h_x,
@@ -470,7 +517,12 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
         return h_batch_new, c_batch_new
 
     def _var_make_step(self, span_repr, relaxed, tau_weights, straight_through, gumbel_noise, ev_sr_actions):
-        # make step on choice of x1 or x2
+        """ Make one step on generating variable tree by classifying the parent span as either an entity or a predicate.
+        
+        [1, 0] -> entity
+        [0, 1] -> predicate
+        """
+        # Get prediction from the linear layer
         var_score = self.var_linear(span_repr)
         var_mask = torch.ones_like(var_score)
 
@@ -485,24 +537,47 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
         return var_cat_distr, gumbel_noise, var_actions
 
     def _make_step(self, hidden, cell, mask_ori, relaxed, tau_weights, straight_through, gumbel_noise, ev_actions):
-        # make step on generating binary tree
+        """ Make one step on generating binary tree. 
+        
+        Args: 
+            hidden: current hidden states
+            cell: current cell states
+            mask_ori: current binary mask
+            relaxed: whether to use relaxed sampling
+            tau_weights: tau weights for relaxed sampling
+            straight_through: whether to use straight through estimator
+            gumbel_noise: noise for gumbel softmax sampling
+            ev_actions: actions to evaluate (for training)
+        
+        """
         mask = copy.deepcopy(mask_ori)
 
+        # get the hidden and cell states of the left and right children
         h_l, c_l = hidden[:, :-1], cell[:, :-1]
         h_r, c_r = hidden[:, 1:], cell[:, 1:]
+
+        # calculate all parents hidden and cell states using the tree lstm cell
         h_p, c_p = self.tree_lstm_cell(h_l, c_l, h_r, c_r)
 
+        # this does nothing as far as I can tell
         q_mul_vector = h_p
 
+        # calculate the score for each parent using the learned vector q
+        # q works as an alignment vector for meaningfulnes, and the score is the dot product of q and the parent hidden state
         score = torch.matmul(q_mul_vector, self.q)  # (N x L x d, d) -> (N x L)
+
+        # create a categorical distribution overl all possible merges (parents)
         cat_distr = Categorical(score, mask)
+
+        # actions can be fed manually for evaluation purposes
         if ev_actions is None:
+            # if not, we sample an action from the categorical distribution
             actions, gumbel_noise = self._sample_action(cat_distr, mask, relaxed, tau_weights, straight_through,
                                                         gumbel_noise)
         else:
 
             actions = ev_actions
-        # ==== incorporate sampled action into the agent's representation of the environment state ====
+        # incorporate sampled action into the agent's representation of the environment state
         h_p, c_p = BinaryTreeBasedModule._merge(actions, h_l, c_l, h_r, c_r, h_p, c_p, mask)
 
         return cat_distr, gumbel_noise, actions, h_p, c_p
@@ -537,6 +612,11 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
 
 
 class Solver(nn.Module):
+    """ Solver class for the COGS model.
+    
+    This class is responsible for generating the final output of the model.
+    It takes the output of the BottomUpTreeComposer and generates the final output using the semantic classifier.
+    """
     # To compose bottom abstractions with rules
     def __init__(self, hidden_dim, output_lang,
                  entity_list=[], caus_predicate_list=[], unac_predicate_list=[]):
@@ -574,6 +654,10 @@ class Solver(nn.Module):
 
         # TODO: maybe have bugs when reduce_span is empty
         # pdb.set_trace()
+
+        # returns either E or P instances depending of whether the token is on the entity or predicate list
+        # span2output_token is a list of pairs like [ [1,1], "cake"], [[3,3], "cook"]]
+        # span2semantic is a dictionary of pairs like {"[1, 1]": E("cake"), "[3, 3]": P("cook")}
         span2semantic = self.init_semantic_class(span2output_token)
         # pdb.set_trace()
 
@@ -583,21 +667,30 @@ class Solver(nn.Module):
         noise_i = None
         eval_swr_actions_i = None
 
+        # for every merge made, of form [parent, [child0, child1]], we iterate bottom up through the tree
         for parent_child_span in parent_child_spans:
+            # extract parent and children
             parent_span = parent_child_span[0]
             child0_span = parent_child_span[1][0]
             child1_span = parent_child_span[1][1]
             assert child0_span[1] < child1_span[0]
+
+            # get E/P entity class of the children
             child0_semantic = span2semantic[str(child0_span)]
             child1_semantic = span2semantic[str(child1_span)]
             # pdb.set_trace()
+
+            # Use linear layers to select semantic operation
             cat_distr, _, actions_i, parent_semantic = self.semantic_merge(child0_semantic, child1_semantic,
                                                                            span2repre[str(parent_span)],
                                                                            relaxed, tau_weights,
                                                                            straight_through, noise_i,
                                                                            eval_swr_actions_i)
+            # returns the distribution (for RL), the sampled action one-hot, and the symbolic meaning of the parent span
+            # assign selected operation to parent
             span2semantic[str(parent_span)] = parent_semantic
 
+            # collect for RL
             if cat_distr is not None:
                 semantic_normalized_entropy.append(cat_distr.normalized_entropy)
                 semantic_log_prob.append(-cat_distr.log_prob(actions_i))
@@ -606,12 +699,16 @@ class Solver(nn.Module):
 
         # pdb.set_trace()
 
+        # calculate the normalized entropy and log probability of the actions taken for RL
         normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
         semantic_log_prob = sum(semantic_log_prob)
 
         assert relaxed is False
 
+        # the final meaning is in the root (the last parent span)
         final_semantic = copy.deepcopy(span2semantic[str(parent_span)])
+
+        # fix the representation of unnaccusative verbs (such as fall), where the subject is actually the theme
         for action_idx in range(len(final_semantic.action_chain)):
             action_info = final_semantic.action_chain[action_idx]
             if action_info[1] is not None and action_info[2] is None and action_info[3] is None:
@@ -637,6 +734,7 @@ class Solver(nn.Module):
                     final_semantic.has_agent = False
                     final_semantic.has_theme = True
 
+        # update the span2semantic with the fixed final semantic
         span2semantic[str(parent_span)] = final_semantic
 
         semantic_rl_infos = [normalized_entropy, semantic_log_prob, span2semantic, parent_span]
@@ -662,6 +760,10 @@ class Solver(nn.Module):
 
     def semantic_merge(self, child0_semantic, child1_semantic, parent_repre,
                        relaxed, tau_weights, straight_through, gumbel_noise, ev_swr_actions):
+        """ Compose the two children into a parent semantic class. 
+        
+        This is done by selecting a semantic operation from the semantic classifier.
+        """
         if isinstance(child0_semantic, E) and isinstance(child1_semantic, E):
             semantic_score = self.semantic_E_E(parent_repre)
             semantic_mask = torch.ones_like(semantic_score)
@@ -901,30 +1003,40 @@ class HRLModel(nn.Module):
         span2output_token_batch = [span2output_token for _ in range(sample_num)]
 
         # tree_rl_info has one entry per sample of the batch
-        # it contains the normalized entropy, log prob, parent-child spans (the merges that were made) and span2repre (embeddings of snaps)
+        # it contains the normalized entropy, log prob, parent-child spans (the merges that were made) and span2repre (embeddings of spans)
         # span2variable_batch contains a mapping of the abstracted spans ([1, 1]) to the tokens (cake, cooked, scientist)
         tree_rl_info, span2variable_batch = self.composer(pair, x, bottom_span_batch, span2output_token_batch)
         tree_normalized_entropy, tree_log_prob, parent_child_spans_batch, span2repre_batch = tree_rl_info
 
         batch_forward_info = []
 
-        # we iterate over samples, and apply semantic composition
+        # we iterate over samples of the batch, and apply semantic composition
         for in_batch_idx in range(sample_num):
+            # get the tree structure, embeddings representations, and mappings to content tokens for the sample
             parent_child_spans = parent_child_spans_batch[in_batch_idx]
             span2repre = span2repre_batch[in_batch_idx]
             span2output_token = span2output_token_batch[in_batch_idx]
 
+            # and send them to the solver to resolve back to a surface form
+            # the solvers walks the tree bottom up, applies semantic composition rules, and generates a logical form
             semantic_rl_infos = self.solver(pair, span2output_token, parent_child_spans, span2repre)
 
+            # returns an entromy, a log prob, the meaning representations, and the root (end) span of the tree
             semantic_normalized_entropy, semantic_log_prob, span2semantic, end_span = semantic_rl_infos
 
+            # convert the resulting tree structure into a flat chain of tokens representing the logical form
             pred_chain = self.translate(span2semantic[str(end_span)])
             # pdb.set_trace()
+
+            # compare the generated logical form to the gold standard logical form
             label_chain = self.process_output(pair[1])
+
+            # and calculate the reward for the generated logical form
             reward = self.get_reward(pred_chain, label_chain)
 
             # pdb.set_trace()
 
+            # combine the syntactic (from the composer) and semantic (from the solver) information to train jointly
             normalized_entropy = tree_normalized_entropy[in_batch_idx] + \
                                  semantic_normalized_entropy
 
