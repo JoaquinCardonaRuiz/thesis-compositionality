@@ -4,3 +4,5 @@ LEAR/COGS_experiment/checkpoint
 LEAR/COGS_experiment/__pycache__
 LEAR/COGS_experiment/modules/__pycache__
 gh_token
+test.py
+test_results.txt

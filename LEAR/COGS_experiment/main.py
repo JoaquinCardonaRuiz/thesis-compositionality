@@ -511,6 +511,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         else:
             val_num = 3000
 
+        print(f"Train: epoch: {epoch} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
         if (batch_idx + 1) % (val_num) == 0:
             logger.info(f"Train: epoch: {epoch} batch_idx: {batch_idx + 1} ce_loss: {ce_loss_meter.avg:.4f} "
                         f"reward_std: {reward_std_meter.avg:.4f} "
@@ -640,7 +641,7 @@ def train_model(args, task_name, logger):
     print('Start lesson ', data_len)
     total_batch_num = 0
     for epoch in range(args.max_epoch):
-
+        print(f"Start epoch {epoch + 1}")
         if data_len in cir_epoch_dict:
             # training epochs
             cir_epoch_num = cir_epoch_dict[data_len]
@@ -755,7 +756,7 @@ def test_model(args, task_name, logger):
 def prepare_arguments(checkpoint_folder, parser):
     high_lr = 1.0   # 1.0
     low_lr = 0.1     # 0.1
-    accumulate_batch_size = 1
+    accumulate_batch_size = 8
     regular_weight = 1e-1   # 1e-1
     regular_decay_rate = 0.5
     simplicity_reward_rate = 0.5
@@ -775,9 +776,9 @@ def prepare_arguments(checkpoint_folder, parser):
             "low-lr": low_lr,  # 0.1
             "epsilon": 0.2,
             "l2-weight": 0.0001,
-            "batch-size": 1,
+            "batch-size": 8,
             "accumulate-batch-size": accumulate_batch_size,
-            "max-epoch": 30,
+            "max-epoch": 1,
             "gpu-id": 0,
             "model-dir": "checkpoint/models/" + checkpoint_folder,
             "logs-path": "checkpoint/logs/" + checkpoint_folder,

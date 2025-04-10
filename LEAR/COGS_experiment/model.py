@@ -706,7 +706,15 @@ class Solver(nn.Module):
         assert relaxed is False
 
         # the final meaning is in the root (the last parent span)
-        final_semantic = copy.deepcopy(span2semantic[str(parent_span)])
+        final_semantic = copy.deepcopy(span2semantic[str(parent_span)]) 
+
+        ## if final semantic is an entity, we create a ghost predicate for it
+        # [ccomp_word/xcomp_word, agent_entity_class, theme_entity_class, recipient_entity_class, action_word]
+        if isinstance(final_semantic, E):
+            action = [None, None, final_semantic, None, 'ghost_predicate']
+            final_semantic = P('ghost_predicate')
+            final_semantic.action_chain = [action]
+
 
         # fix the representation of unnaccusative verbs (such as fall), where the subject is actually the theme
         for action_idx in range(len(final_semantic.action_chain)):
@@ -1027,11 +1035,12 @@ class HRLModel(nn.Module):
             # convert the resulting tree structure into a flat chain of tokens representing the logical form
             pred_chain = self.translate(span2semantic[str(end_span)])
             # pdb.set_trace()
+            
 
-            # compare the generated logical form to the gold standard logical form
-            label_chain = self.process_output(pair[1])
+            # conver the gold label into a flat chain of tokens representing the logical form
+            label_chain = self.process_output_alt(pair[1])
 
-            # and calculate the reward for the generated logical form
+            # and calculate the reward for the generated logical form by comparing to the gold
             reward = self.get_reward(pred_chain, label_chain)
 
             # pdb.set_trace()
@@ -1050,10 +1059,17 @@ class HRLModel(nn.Module):
         return batch_forward_info, pred_chain, label_chain
 
     def get_reward(self, pred_chain, label_chain):
+        """ Calculate the reward for the generated logical form by comparing to the gold."""
+        # get lens
         pred_len = len(pred_chain)
         label_len = len(label_chain)
+
+        # longest common consecutive subsequence
         max_com_len = 0
+
+        # for every token in the model's output
         for pred_idx in range(pred_len):
+            # for every token in the gold label
             for label_idx in range(label_len):
                 com_len = 0
                 if pred_chain[pred_idx] != label_chain[label_idx]:
@@ -1095,33 +1111,190 @@ class HRLModel(nn.Module):
 
         return flat_chain
 
+    def action_info_dict(self, action_info):
+        action_info_dict = {
+            "embed_type": action_info[0],
+            "agent": action_info[1],
+            "theme": action_info[2],
+            "recipient": action_info[3],
+            "action_word": action_info[4]
+        }
+        return action_info_dict
+
     # Translate a nest class into a list
     def translate(self, semantic):
+        """ Takes a semantic class P and returns a flat list of tokens.
+        
+        This is the final output of the model, and is used to generate the final logical form.
+        """
+        # ensure tree root is a predicate
         assert isinstance(semantic, P)
+
+        # we start with an empty chain of tokens, and iterate over the action chain of the tree
         flat_chain = []
 
         for action_idx, action_info in enumerate(semantic.action_chain):
+            # action_info is a list of the form:
+            # [action_type, agent_obj, theme_obj, recipient_obj, action_word]
+
             # [ccomp_word / xcomp_word, agent_entity_class, theme_entity_class, recipient_entity_class, action_word]
+            
+            # our first action is always a predicate, so we start with the action word
             if action_idx == 0:
                 flat_action_chain = [action_info[4]]
+            # later actions have either a ccomp or xcopm, and then the action word
             else:
                 assert action_info[0] is not None
                 flat_action_chain = [action_info[0], action_info[4]]
 
+            # if it is an xcomp, we use the previous action word as the agent for this action
+            # xcomp is for structures such as "the girl tried to roll", where the subjects of
+            # both "tried" and "roll" are the same
             if action_info[0] == 'xcomp':
                 agent_chain = reserve_agent_chain
             else:
                 agent_chain = self.get_entity_chain(action_info[1])
+            # we use get_entity_chain to flatten entities into its string components
             theme_chain = self.get_entity_chain(action_info[2])
             recipient_chain = self.get_entity_chain(action_info[3])
+
+            # compose a flat action chain from the action word and the agent, theme, and recipient chains
             flat_action_chain = flat_action_chain + agent_chain + theme_chain + recipient_chain
             reserve_agent_chain = copy.deepcopy(agent_chain)
 
+            # append the flat action chain to the flat chain
             flat_chain = flat_chain + flat_action_chain
 
         return flat_chain
 
+    def process_output_alt(self, s):        
+        def extract_vars(raw):
+            vars = {}    
+            predicates = []
+            nmods = {}
+            rels = []
+            
+            elements = raw.replace(" and ", ";").split(";")
+            for element in elements:
+                # if there is an nmod, it is a noun modifier
+                if ". nmod ." in element:
+                    # cake.nmod.on.x_4.x_7
+                    nmod = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
+                    nmod = nmod.split(".")
+                    nmod_args = nmod[-3:]
+                    nmods[nmod[-2]] = nmod_args
+
+                elif ". nmod" in element:
+                    # cake.nmod.x_4.x_7
+                    rel = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
+                    rel = rel.split(".")
+                    rel_pred = rel[-1]
+                    rels.append(rel_pred)
+
+                # if there is a comma, it is a predicate
+                elif ',' in element:
+                    # study . agent ( x _ 2 , x _ 1 )
+                    predicate = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
+                    predicate_args = predicate.split(".")
+                    predicates.append(predicate_args)
+                # if there is no comma, it is a variable
+                else:
+                    element = element.replace(" ", "").replace("(",".").replace(")","")
+                    element = element.split(".")
+                    vars[element[1]] = element[0]
+
+            for pred in predicates:
+                vars[pred[2]] = pred[0]
+
+            return {"vars": vars, "predicates": predicates, "nmods": nmods, "rels": rels, "raw": raw}
+
+        def compose(sentence_info):
+            vars = sentence_info["vars"]
+            predicates = sentence_info["predicates"]
+            nmods = sentence_info["nmods"]
+            rels = sentence_info["rels"]
+
+            predicate_dict = {}
+            for pred in predicates:
+                # study . agent ( x _ 2 , x _ 1 )
+                pred_name = pred[0]
+                if pred_name not in predicate_dict:
+                    predicate_dict[pred_name] = []
+                predicate_dict[pred_name].append(pred[1:])
+            # {'study': [['agent', 'x_2', 'x_1']]}
+
+            result = []
+            # to find if there is not a root predicate
+            # we check whether there is a predicate_id that is not in a rel
+            is_root_predicate = any([any([args[1] not in rels for args in predicate_dict[pred_name]]) for pred_name in predicate_dict.keys()])
+
+            if not is_root_predicate:
+                # if there is no predicate, we insert a ghost predicate
+                # its theme is the first variable that does not belong to an nmod or predicate
+                for var in vars.keys():
+                    if var not in [nmods[key][-1] for key in nmods.keys()] and var not in [predicate_dict[key][0][1] for key in predicate_dict.keys()]:
+                        ghost_theme = var
+                        break
+                predicate_dict["x"] = [["theme", "x", ghost_theme]]
+                vars["x"] = "ghost_predicate"
+            
+            sentence_info['predicate_dict'] = predicate_dict
+
+            for pred_name, args in predicate_dict.items():
+                # pred, agent, theme, recipient, ccomp, pred2...
+                agent, theme, recipient, comp = "None", "None", "None", "None"
+                for arg in args:
+                    if arg[0] == "agent":
+                        agent = arg[2]
+                    elif arg[0] == "theme":
+                        theme = arg[2]
+                    elif arg[0] == "recipient":
+                        recipient = arg[2]
+                    elif arg[0] in ["ccomp", "xcomp"]:
+                        comp = arg[0]
+                flat_chain = [arg[1], agent, theme, recipient]
+                if comp != "None":
+                    flat_chain.append(comp)
+                result.extend(flat_chain)
+
+            sentence_info['var_result'] = result
+
+            # place rels
+            for rel in rels:
+                try:
+                    ix = result.index(rel)
+                except ValueError:  
+                    print(sentence_info)
+                    raise ValueError(f"Key {rel} not found in result: {result}")
+                result.insert(ix, 'that')
+
+            # place nmods
+            for key in nmods.keys():
+                try:
+                    ix = result.index(key)
+                except ValueError:
+                    print(sentence_info)
+                    raise ValueError(f"Key {key} not found in result: {result}")
+                result.insert(ix + 1, nmods[key][0])
+                result.insert(ix + 2, nmods[key][-1])
+
+            # replace vars
+            for i in range(len(result)):
+                if result[i] in vars.keys():
+                    result[i] = vars[result[i]]
+
+                if result[i] != "None":
+                    result[i] = result[i].lower().replace("*", "")
+            return result
+        
+        sentence_info = extract_vars(s)
+        result = compose(sentence_info)
+        return result
+
+
     def process_output(self, output):
+        """ Process the flat list of tokens into a string representation of the logical form.
+        """
         output_process = output.replace(" and ", " AND ")
         output_process = output_process.replace(" ccomp ", " CCOMP ")
         output_process = output_process.replace(" xcomp ", " XCOMP ")
@@ -1152,7 +1325,7 @@ class HRLModel(nn.Module):
         for function in output_process_no_obj:
             if 'NMOD' in function:  # pr
                 function_para = re.split("\(|\)|\.|,", function)[:-1]
-                assert len(function_para) == 5
+                assert len(function_para) == 5, f"function_para: {function_para}, {output}"
                 pr_word = function_para[2]
                 pr_subject_index = function_para[3]
                 pr_subject = object_stack[pr_subject_index]
@@ -1259,5 +1432,4 @@ class HRLModel(nn.Module):
             else:
                 assert pred_info in ["CCOMP", "XCOMP"]
                 flat_chain.append(pred_info.lower())
-
         return flat_chain
