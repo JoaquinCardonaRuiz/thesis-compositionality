@@ -700,6 +700,7 @@ class Solver(nn.Module):
         # pdb.set_trace()
 
         # calculate the normalized entropy and log probability of the actions taken for RL
+        assert len(semantic_normalized_entropy) > 0, f"===== No semantic actions taken =====\n{pair}\n{semantic_normalized_entropy}\n{span2semantic}\n{parent_child_spans}"
         normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
         semantic_log_prob = sum(semantic_log_prob)
 
@@ -990,10 +991,9 @@ class HRLModel(nn.Module):
 
     def forward(self, pair, x, sample_num, is_test=False, epoch=None, debug_info=None):
         self.is_test = is_test
-
-        batch_forward_info, pred_chain, label_chain = self._forward(
+        batch_forward_info, pred_chain, label_chain, state = self._forward(
             pair, x, sample_num, epoch, is_test, debug_info=debug_info)
-        return batch_forward_info, pred_chain, label_chain
+        return batch_forward_info, pred_chain, label_chain, state
 
     def _forward(self, pair, x, sample_num, epoch, is_test, debug_info):
         assert x.size(1) > 1
@@ -1003,18 +1003,22 @@ class HRLModel(nn.Module):
         # [[1, 1], [3, 3], [6, 6]]
         # Corresponding to: cake, cooked, scientist
 
+
         span2output_token = self.classifier(x, bottom_span)
         # [[[1, 1], "cake"], [[3, 3], "cook"], [[6, 6], "scientist"]]
+
 
         # repeat sample_num (10) times to explore different trees
         bottom_span_batch = [bottom_span for _ in range(sample_num)]
         span2output_token_batch = [span2output_token for _ in range(sample_num)]
+
 
         # tree_rl_info has one entry per sample of the batch
         # it contains the normalized entropy, log prob, parent-child spans (the merges that were made) and span2repre (embeddings of spans)
         # span2variable_batch contains a mapping of the abstracted spans ([1, 1]) to the tokens (cake, cooked, scientist)
         tree_rl_info, span2variable_batch = self.composer(pair, x, bottom_span_batch, span2output_token_batch)
         tree_normalized_entropy, tree_log_prob, parent_child_spans_batch, span2repre_batch = tree_rl_info
+
 
         batch_forward_info = []
 
@@ -1024,6 +1028,8 @@ class HRLModel(nn.Module):
             parent_child_spans = parent_child_spans_batch[in_batch_idx]
             span2repre = span2repre_batch[in_batch_idx]
             span2output_token = span2output_token_batch[in_batch_idx]
+
+            assert len(parent_child_spans) != 0, f"===== No semantic actions taken =====\n{pair}\n{parent_child_spans}\n{span2repre}\n{span2output_token}"
 
             # and send them to the solver to resolve back to a surface form
             # the solvers walks the tree bottom up, applies semantic composition rules, and generates a logical form
@@ -1040,6 +1046,16 @@ class HRLModel(nn.Module):
             # conver the gold label into a flat chain of tokens representing the logical form
             label_chain = self.process_output_alt(pair[1])
 
+            #if "who" in pair[1] or "what" in pair[1]:
+            #    print("")
+            #    print(f"Gold Label: {pair[1]}")
+            #    print(f"Parsed Gold Label {label_chain}")
+            #    print(f"Predicted Label Chain {pred_chain}")
+            #Gold Label: * table ( x _ 6 ) ; cook . agent ( x _ 1 , ? ) and cook . theme ( x _ 1 , x _ 3 ) and cake ( x _ 3 ) and cake . nmod . beside ( x _ 3 , x _ 6 )
+            #Parsed Gold Label ['cook', '?', 'cake', 'beside', 'table', 'None']
+            #Predicted Label Chain ['cook', 'who', 'cake', 'beside', 'table', 'None']
+
+
             # and calculate the reward for the generated logical form by comparing to the gold
             reward = self.get_reward(pred_chain, label_chain)
 
@@ -1055,8 +1071,19 @@ class HRLModel(nn.Module):
             batch_forward_info.append([normalized_entropy, log_prob, reward])
 
         # pdb.set_trace()
+        state = {
+            "bottom_span": bottom_span,
+            "span2output_token": span2output_token_batch,
+            "parent_child_spans": parent_child_spans,
+            "span2output_token": span2output_token,
+            "span2semantic": span2semantic,
+            "end_span": end_span,
+            "pred_chain": pred_chain,
+            "label_chain": label_chain,
+            "pair": pair
+        }
 
-        return batch_forward_info, pred_chain, label_chain
+        return batch_forward_info, pred_chain, label_chain, state
 
     def get_reward(self, pred_chain, label_chain):
         """ Calculate the reward for the generated logical form by comparing to the gold."""
@@ -1167,7 +1194,7 @@ class HRLModel(nn.Module):
 
         return flat_chain
 
-    def process_output_alt(self, s):        
+    def process_output_alt(self, s):
         def extract_vars(raw):
             vars = {}    
             predicates = []
@@ -1214,10 +1241,12 @@ class HRLModel(nn.Module):
             nmods = sentence_info["nmods"]
             rels = sentence_info["rels"]
 
+            # we create a dictionary of predicates, where the key is the predicate name and the value is a list of its arguments
             predicate_dict = {}
             for pred in predicates:
                 # study . agent ( x _ 2 , x _ 1 )
-                pred_name = pred[0]
+                # we disambiguate the predicate name by appending the number of the variable
+                pred_name = pred[0] + pred[2].split("_")[1]
                 if pred_name not in predicate_dict:
                     predicate_dict[pred_name] = []
                 predicate_dict[pred_name].append(pred[1:])
@@ -1232,7 +1261,7 @@ class HRLModel(nn.Module):
                 # if there is no predicate, we insert a ghost predicate
                 # its theme is the first variable that does not belong to an nmod or predicate
                 for var in vars.keys():
-                    if var not in [nmods[key][-1] for key in nmods.keys()] and var not in [predicate_dict[key][0][1] for key in predicate_dict.keys()]:
+                    if var not in [nmods[n_key][-1] for n_key in nmods.keys()] and var not in [predicate_dict[p_key][0][1] for p_key in predicate_dict.keys()]:
                         ghost_theme = var
                         break
                 predicate_dict["x"] = [["theme", "x", ghost_theme]]
@@ -1311,7 +1340,7 @@ class HRLModel(nn.Module):
         output_process_no_obj = copy.deepcopy(output_process)
         for function in output_process:
             if '.' not in function:  # entity
-                function_para = re.split("\(|\)", function)[:-1]
+                function_para = re.split(r"\(|\)", function)[:-1]
                 assert len(function_para) == 2
                 object, object_index = function_para
                 assert object_index not in object_stack
@@ -1324,7 +1353,7 @@ class HRLModel(nn.Module):
         output_process_no_obj.reverse()
         for function in output_process_no_obj:
             if 'NMOD' in function:  # pr
-                function_para = re.split("\(|\)|\.|,", function)[:-1]
+                function_para = re.split(r"\(|\)|\.|,", function)[:-1]
                 assert len(function_para) == 5, f"function_para: {function_para}, {output}"
                 pr_word = function_para[2]
                 pr_subject_index = function_para[3]
@@ -1353,7 +1382,7 @@ class HRLModel(nn.Module):
         predicate_object_stack = {}
         for function in output_process_no_obj_no_pr:
             if 'COMP' not in function:
-                function_para = re.split("\(|\)|\.|,", function)[:-1]
+                function_para = re.split(r"\(|\)|\.|,", function)[:-1]
                 assert len(function_para) == 4
                 predicate, object_type, predicate_index, object_index = function_para
                 if 'X' not in object_index:
@@ -1380,7 +1409,7 @@ class HRLModel(nn.Module):
         if output_process_only_comp:
             output_process_only_comp.reverse()
             for function in output_process_only_comp:
-                function_para = re.split("\(|\)|\.|,", function)[:-1]
+                function_para = re.split(r"\(|\)|\.|,", function)[:-1]
                 assert len(function_para) == 4
                 compose_type = function_para[1]
                 assert compose_type in ["CCOMP", "XCOMP"]

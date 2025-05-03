@@ -15,6 +15,7 @@ from model import HRLModel, PAD_token, EOS_token
 from utils import AverageMeter
 from utils import VisualizeLogger
 from utils import get_logger
+from utils import Logger
 
 import re
 import json
@@ -88,7 +89,7 @@ def data_file_process(file):
         lines_norm = []
         for line in lines:
             input = line[0].strip(' .')
-            output = line[1].strip('"')
+            output = line[1].strip('"').replace('?', input.split(' ')[0].lower())
             input_tokens = input.split()
             if len(input_tokens) <= 1:
                 continue
@@ -127,23 +128,23 @@ def prepare_dataset(lang1, lang2, task_name):
         output_lang.index_words(pair[1])
 
 
-    encode_token_filename = './preprocess/encode_tokens.txt'
+    encode_token_filename = f'./{task_name}_data/preprocess/encode_tokens.txt'
     with open(encode_token_filename, 'r') as f:
         encode_tokens = f.readlines()
         for encode_token in encode_tokens:
             input_lang.index_word(encode_token.strip("\n"))
 
-    decode_entity_filename = './preprocess/entity'
+    decode_entity_filename = f'./{task_name}_data/preprocess/entity'
     with open(decode_entity_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
             output_lang.index_word(decode_token.strip("\n"))
-    decode_caus_predicate_filename = './preprocess/caus_predicate'
+    decode_caus_predicate_filename = f'./{task_name}_data/preprocess/caus_predicate'
     with open(decode_caus_predicate_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
             output_lang.index_word(decode_token.strip("\n"))
-    decode_unac_predicate_filename = './preprocess/unac_predicate'
+    decode_unac_predicate_filename = f'./{task_name}_data/preprocess/unac_predicate'
     with open(decode_unac_predicate_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
@@ -175,12 +176,13 @@ def make_path_preparations(args, run_mode):
     random.seed(seed)
 
     if run_mode == 'train':
-        log_dir = os.path.split(args.logs_path)[0]
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
 
-        _logger = get_logger(f"{args.logs_path}.log")
-        print(f"{args.logs_path}.log")
+        if not os.path.exists(args.train_logs_path):
+            os.makedirs(args.train_logs_path)
+                    
+        _logger = Logger(args.train_logs_path, args.checkpoint)
+        #_logger = get_logger(f"{args.logs_path}.log")
+        #print(f"{args.logs_path}.log")
         _logger.info(f"random seed: {seed}")
 
         if not os.path.exists(args.model_dir):
@@ -188,7 +190,14 @@ def make_path_preparations(args, run_mode):
         _logger.info(f"checkpoint's dir is: {args.model_dir}")
         _visualizer = VisualizeLogger(summary_dir=args.model_dir)
     else:
-        _logger = None
+        run_name = args.checkpoint.split('/')[-2]
+        checkpoint_name = args.checkpoint.split('/')[-1].replace('.mdl', '')
+        log_dir = args.test_logs_path + run_name + '/'
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        
+        _logger = Logger(log_dir, checkpoint_name)
+
         _visualizer = None
 
     return _logger, _visualizer
@@ -262,7 +271,9 @@ def test(test_data, model, example2type, device, log_file=None):
             if USE_CUDA:
                 tokens = tokens.cuda()
             # pdb.set_trace()
-            batch_forward_info, pred_chain, label_chain = model(test_data_example, tokens, 1, is_test=True)
+            batch_forward_info, pred_chain, label_chain, state = model(test_data_example, tokens, 1, is_test=True)
+
+            logger.log_state(state)
             # pdb.set_trace()
             normalized_entropy, log_prob, reward = batch_forward_info[0]
 
@@ -334,7 +345,7 @@ def validate(valid_data, model, epoch, device, logger):
 
             # print('--' * 20)
             # print(valid_data_example[0])
-            batch_forward_info, pred_chain, label_chain = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
+            batch_forward_info, pred_chain, label_chain, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
             normalized_entropy, log_prob, reward = batch_forward_info[0]
 
             """
@@ -447,7 +458,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
             if USE_CUDA:
                 tokens = tokens.cuda()
 
-            batch_forward_info, pred_chain, label_chain = \
+            batch_forward_info, pred_chain, label_chain, _ = \
                 model(train_pair, tokens, sample_num, is_test=False, epoch=epoch)
 
             for forward_info in batch_forward_info:
@@ -563,36 +574,39 @@ def train_model(args, task_name, logger):
 
     train_data.sort(key=lambda p: len(p[0].split()))
 
+    # DELETE THIS
+    train_data = train_data[:1000]
+
     dev_data = list(set([tuple(item) for item in dev_data]))
     dev_data.sort(key=lambda p: len(p[0].split()))
     dev_data = [list(item) for item in dev_data]
 
-    print(random.choice(train_data))
-    print(random.choice(dev_data))
+    #print(random.choice(train_data))
+    #print(random.choice(dev_data))
 
     args.vocab_size = input_lang.n_words
     args.label_size = output_lang.n_words
 
     # read pre-alignment file
-    alignment_filename = './preprocess/enct2dect'
+    alignment_filename = f'./{task_name}_data/preprocess/enct2dect'
     alignments_idx = get_alignment(alignment_filename, input_lang, output_lang)
 
     entity_list = []
-    entity_filename = './preprocess/entity'
+    entity_filename = f'./{task_name}_data/preprocess/entity'
     with open(entity_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
             entity_list.append(decode_token.strip("\n"))
 
     caus_predicate_list = []
-    caus_predicate_filename = './preprocess/caus_predicate'
+    caus_predicate_filename = f'./{task_name}_data/preprocess/caus_predicate'
     with open(caus_predicate_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
             caus_predicate_list.append(decode_token.strip("\n"))
 
     unac_predicate_list = []
-    unac_predicate_filename = './preprocess/unac_predicate'
+    unac_predicate_filename = f'./{task_name}_data/preprocess/unac_predicate'
     with open(unac_predicate_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
@@ -641,7 +655,7 @@ def train_model(args, task_name, logger):
     print('Start lesson ', data_len)
     total_batch_num = 0
     for epoch in range(args.max_epoch):
-        print(f"Start epoch {epoch + 1}")
+        logger.info(f"Start epoch {epoch + 1}")
         if data_len in cir_epoch_dict:
             # training epochs
             cir_epoch_num = cir_epoch_dict[data_len]
@@ -661,16 +675,23 @@ def train_model(args, task_name, logger):
                                                   dev_data[:dev_lesson_idx], model, optimizer,
                                                   epoch, args, logger,
                                                   total_batch_num, data_len, regular_weight)
+        # end of epoch
+        logger.info(f"End epoch {epoch + 1}")
+        logger.info(f"Epoch {epoch + 1} Dev accuracy: {val_accuracy:.4f}")
+
+        final_dev_acc = validate(train_data+dev_data, model, epoch, 0, logger)
+        logger.info(f"Epoch {epoch + 1} Train+Dev accuracy: {final_dev_acc:.4f}")
+
+        final_gen_acc = validate(gen_data, model, epoch, 0, logger)
+        logger.info(f"Epoch {epoch + 1} Gen accuracy: {final_gen_acc:.4f}")
+
+        logger.info("Saving model...")
+        best_model_path = f"{args.model_dir}/epoch-{epoch}.mdl"
+        torch.save({"epoch": epoch, "batch_idx": "final", "state_dict": model.state_dict()}, best_model_path)
 
         if val_accuracy == 1.:
-            final_dev_acc = validate(train_data+dev_data, model, epoch, 0, logger)
-            if final_dev_acc == 1.:
-                validate(gen_data, model, epoch, 0, logger)
-                logger.info("saving model...")
-                best_model_path = f"{args.model_dir}/{epoch}-final.mdl"
-                torch.save({"epoch": epoch, "batch_idx": "final", "state_dict": model.state_dict()}, best_model_path)
-                print("Finish Training. Training Succeed :)")
-                break
+            logger.info(r"Training reached 100% accuracy, stopping training.")
+            break
 
 
 def test_model(args, task_name, logger):
@@ -686,31 +707,31 @@ def test_model(args, task_name, logger):
     args.label_size = output_lang.n_words
 
     # read pre-alignment file
-    alignment_filename = './preprocess/enct2dect'
+    alignment_filename = f'./{task_name}_data/preprocess/enct2dect'
     alignments_idx = get_alignment(alignment_filename, input_lang, output_lang)
 
     entity_list = []
-    entity_filename = './preprocess/entity'
+    entity_filename = f'./{task_name}_data/preprocess/entity'
     with open(entity_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
             entity_list.append(decode_token.strip("\n"))
 
     caus_predicate_list = []
-    caus_predicate_filename = './preprocess/caus_predicate'
+    caus_predicate_filename = f'./{task_name}_data/preprocess/caus_predicate'
     with open(caus_predicate_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
             caus_predicate_list.append(decode_token.strip("\n"))
 
     unac_predicate_list = []
-    unac_predicate_filename = './preprocess/unac_predicate'
+    unac_predicate_filename = f'./{task_name}_data/preprocess/unac_predicate'
     with open(unac_predicate_filename, 'r') as f:
         decode_tokens = f.readlines()
         for decode_token in decode_tokens:
             unac_predicate_list.append(decode_token.strip("\n"))
 
-    example2type_file = './preprocess/example2type'
+    example2type_file = f'./{task_name}_data/preprocess/example2type'
     with open(example2type_file, 'r') as f:
         example2type = json.load(f)
 
@@ -744,7 +765,7 @@ def test_model(args, task_name, logger):
         test_data = test_data[:test_lesson_idx]
     random.shuffle(test_data)
     print("Start testing ..")
-    log_file = './log/' + re.split('/|\.', checkpoint_file)[-3] + "_" + re.split('/|\.', checkpoint_file)[-2] + '.txt'
+    log_file = './log/' + re.split(r'/|\.', checkpoint_file)[-3] + "_" + re.split(r'/|\.', checkpoint_file)[-2] + '.txt'
     # pdb.set_trace()
     test_acc, type_right_count = test(test_data, model, example2type, args.gpu_id, log_file)
     print("Test Acc: {} %".format(test_acc * 100))
@@ -778,10 +799,11 @@ def prepare_arguments(checkpoint_folder, parser):
             "l2-weight": 0.0001,
             "batch-size": 8,
             "accumulate-batch-size": accumulate_batch_size,
-            "max-epoch": 1,
+            "max-epoch": 30,
             "gpu-id": 0,
             "model-dir": "checkpoint/models/" + checkpoint_folder,
-            "logs-path": "checkpoint/logs/" + checkpoint_folder,
+            "train-logs-path": "checkpoint/logs/train/" + checkpoint_folder,
+            "test-logs-path": "checkpoint/logs/test/",
             "encode-mode": encode_mode,
             "regular-decay-rate": regular_decay_rate,
             "x-ratio-rate": simplicity_reward_rate}
@@ -812,7 +834,8 @@ def prepare_arguments(checkpoint_folder, parser):
     parser.add_argument("--max-epoch", required=False, default=args["max-epoch"], type=int)
     parser.add_argument("--gpu-id", required=False, default=args["gpu-id"], type=int)
     parser.add_argument("--model-dir", required=False, default=args["model-dir"], type=str)
-    parser.add_argument("--logs-path", required=False, default=args["logs-path"], type=str)
+    parser.add_argument("--train-logs-path", required=False, default=args["train-logs-path"], type=str)
+    parser.add_argument("--test-logs-path", required=False, default=args["test-logs-path"], type=str)
     parser.add_argument("--encode-mode", required=False, default=args["encode-mode"], type=str)
 
     parser.add_argument("--regular-weight", default=args["regular-weight"], type=float)

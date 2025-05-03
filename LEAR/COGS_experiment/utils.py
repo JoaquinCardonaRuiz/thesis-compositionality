@@ -157,6 +157,49 @@ class AverageMeter:
         self.count += n
         self.avg = self.sum / self.count
 
+class Logger():
+    """ Create a logger for training and testing.
+    
+    The logger has three handlers:
+    1. Console handler: prints log messages to the console.
+    2. File handler: writes log messages to a file.
+    3. File handler: write predictions to a file.
+    """
+
+    def __init__(self, log_dir, checkpoint_name):
+        print(f"Creating logger at {log_dir} with name {checkpoint_name}.")
+        self.logger = logging.getLogger("general_logger")
+        self.logger.setLevel(logging.INFO)
+        self.checkpoint_name = checkpoint_name
+        self.log_dir = log_dir
+
+        # Create console handler and set level to debug
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+
+        # Create file handler and set level to debug
+        fh = logging.FileHandler(os.path.join(log_dir, f"{checkpoint_name}.log"), mode='w')
+        fh.setLevel(logging.INFO)
+
+        # Create formatter
+        formatter = logging.Formatter("%(asctime)s - %(message)s", "%d-%m-%Y %H:%M:%S")
+
+        # Add formatter to handlers
+        ch.setFormatter(formatter)
+        fh.setFormatter(formatter)
+
+        # Add handlers to logger
+        self.logger.addHandler(ch)
+        self.logger.addHandler(fh)
+        self.logger.info("Logger initialized.")
+
+    def info(self, message):
+        self.logger.info(message)
+
+    def log_state(self, state):
+        with open(f"{self.log_dir}{self.checkpoint_name}.tsv", 'a') as f:
+            f.write(f"{state}\n")
+
 
 def get_logger(file_name):
     logger = logging.getLogger("general_logger")
