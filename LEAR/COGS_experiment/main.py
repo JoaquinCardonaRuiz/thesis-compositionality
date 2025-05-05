@@ -273,7 +273,6 @@ def test(test_data, model, example2type, device, log_file=None):
             # pdb.set_trace()
             batch_forward_info, pred_chain, label_chain, state = model(test_data_example, tokens, 1, is_test=True)
 
-            logger.log_state(state)
             # pdb.set_trace()
             normalized_entropy, log_prob, reward = batch_forward_info[0]
 
@@ -286,6 +285,9 @@ def test(test_data, model, example2type, device, log_file=None):
             if example_type not in type_right_count:
                 type_right_count[example_type] = []
             type_right_count[example_type].append(accuracy.item())
+
+            state["category"] = example_type
+            logger.log_state(state)
 
             # if accuracy == 1:
             #     with open(file_right, 'a') as f:

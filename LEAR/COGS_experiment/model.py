@@ -43,24 +43,31 @@ class E:  # Entities (M0~M9)
         self.entity_chain = [[None, None, entity]]
         # entity_class
         self.entity_para = None
+        self.json_repr = {"children": [], "token": entity, "rel": "", "class": "E"}
 
     def add_E_in(self, E0):
         left_E = copy.deepcopy(E0)
         left_E.entity_chain[0][0] = 'in'
         self.entity_chain = self.entity_chain + left_E.entity_chain
         self.entity_para = None
+        left_E.json_repr['rel'] = 'in'
+        self.json_repr['children'].append(left_E.json_repr)
 
     def add_E_on(self, E0):
         left_E = copy.deepcopy(E0)
         left_E.entity_chain[0][0] = 'on'
         self.entity_chain = self.entity_chain + left_E.entity_chain
         self.entity_para = None
+        left_E.json_repr['rel'] = 'on'
+        self.json_repr['children'].append(left_E.json_repr)
 
     def add_E_beside(self, E0):
         left_E = copy.deepcopy(E0)
         left_E.entity_chain[0][0] = 'beside'
         self.entity_chain = self.entity_chain + left_E.entity_chain
         self.entity_para = None
+        left_E.json_repr['rel'] = 'beside'
+        self.json_repr['children'].append(left_E.json_repr)
 
     def add_E_recipient_theme(self, E0):
         self.entity_chain[0][1] = 'recipient'
@@ -98,12 +105,18 @@ class P:
 
         self.is_full = False
 
+        self.json_repr = {"children": [], "token": action, "rel": "", "class": "P"}
+
+
     def add_E_agent(self, E0):
         assert E0.entity_para is None
 
         E_add = copy.deepcopy(E0)
         E_add.entity_chain[0][1] = 'agent'
         self.action_chain[0][1] = E_add
+
+        E_add.json_repr['rel'] = 'agent'
+        self.json_repr['children'].append(E_add.json_repr)
 
     def add_E_theme(self, E0):
         assert E0.entity_para is None
@@ -112,12 +125,18 @@ class P:
         E_add.entity_chain[0][1] = 'theme'
         self.action_chain[0][2] = E_add
 
+        E_add.json_repr['rel'] = 'theme'
+        self.json_repr['children'].append(E_add.json_repr)
+
     def add_E_recipient(self, E0):
         assert E0.entity_para is None
 
         E_add = copy.deepcopy(E0)
         E_add.entity_chain[0][1] = 'recipient'
         self.action_chain[0][3] = E_add
+
+        E_add.json_repr['rel'] = 'recipient'
+        self.json_repr['children'].append(E_add.json_repr)
 
     def add_E_recipient_theme(self, E0):
         assert E0.entity_chain[0][1] == 'recipient'
@@ -132,6 +151,11 @@ class P:
         self.action_chain[0][3] = E_add_0
         self.action_chain[0][2] = E_add_1
 
+        E_add_0.json_repr['rel'] = 'recipient'
+        E_add_1.json_repr['rel'] = 'theme'
+        self.json_repr['children'].append(E_add_0.json_repr)
+        self.json_repr['children'].append(E_add_1.json_repr)
+
     def add_E_theme_recipient(self, E0):
         assert E0.entity_chain[0][1] == 'theme'
         assert E0.entity_para.entity_chain[0][1] == 'recipient'
@@ -144,6 +168,11 @@ class P:
 
         self.action_chain[0][2] = E_add_0
         self.action_chain[0][3] = E_add_1
+
+        E_add_0.json_repr['rel'] = 'theme'
+        E_add_1.json_repr['rel'] = 'recipient'
+        self.json_repr['children'].append(E_add_0.json_repr)
+        self.json_repr['children'].append(E_add_1.json_repr)
 
     def add_E_theme_agent(self, E0):
         assert E0.entity_chain[0][1] == 'theme'
@@ -158,6 +187,11 @@ class P:
         self.action_chain[0][2] = E_add_0
         self.action_chain[0][1] = E_add_1
 
+        E_add_0.json_repr['rel'] = 'theme'
+        E_add_1.json_repr['rel'] = 'agent'
+        self.json_repr['children'].append(E_add_0.json_repr)
+        self.json_repr['children'].append(E_add_1.json_repr)
+
     def add_E_recipient_agent(self, E0):
         assert E0.entity_chain[0][1] == 'recipient'
         assert E0.entity_para.entity_chain[0][1] == 'agent'
@@ -171,17 +205,29 @@ class P:
         self.action_chain[0][3] = E_add_0
         self.action_chain[0][1] = E_add_1
 
+        E_add_0.json_repr['rel'] = 'recipient'
+        E_add_1.json_repr['rel'] = 'agent'
+        self.json_repr['children'].append(E_add_0.json_repr)
+        self.json_repr['children'].append(E_add_1.json_repr)
+
+
     def add_P_ccomp(self, P0):
         P_add = copy.deepcopy(P0)
         P_add.action_chain[0][0] = 'ccomp'
 
         self.action_chain = self.action_chain + P_add.action_chain
 
+        P_add.json_repr['rel'] = 'ccomp'
+        self.json_repr['children'].append(P_add.json_repr)
+
     def add_P_xcomp(self, P0):
         P_add = copy.deepcopy(P0)
         P_add.action_chain[0][0] = 'xcomp'
 
         self.action_chain = self.action_chain + P_add.action_chain
+
+        P_add.json_repr['rel'] = 'xcomp'
+        self.json_repr['children'].append(P_add.json_repr)
 
 
 class BottomAbstrator(nn.Module):
@@ -1080,10 +1126,12 @@ class HRLModel(nn.Module):
             "end_span": end_span,
             "pred_chain": pred_chain,
             "label_chain": label_chain,
-            "pair": pair
+            "pair": pair,
+            "parent_json": span2semantic[str(end_span)].json_repr
         }
 
         return batch_forward_info, pred_chain, label_chain, state
+
 
     def get_reward(self, pred_chain, label_chain):
         """ Calculate the reward for the generated logical form by comparing to the gold."""

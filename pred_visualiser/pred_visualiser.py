@@ -74,16 +74,27 @@ def load_file(filename):
                 cleaned = clean_model_objects(row[0])
                 parsed_row = ast.literal_eval(cleaned)
                 tree = build_tree(parsed_row)
+                tree["span2output_token"] = parsed_row.get("span2output_token", [])
                 response.append({
                     "sentence": parsed_row.get("pair", [""])[0],
+                    "gold": parsed_row.get("pair", [""])[1],
                     "correct": parsed_row.get("pred_chain") == parsed_row.get("label_chain"),
-                    "tree": tree
+                    "tree": tree,
+                    "sem_tree": parsed_row.get("parent_json"),
+                    "category": parsed_row.get("category"),
+                    "output": parsed_row.get("pred_chain"),
+                    "gold": parsed_row.get("label_chain"),
                 })
             except Exception as e:
                 response.append({
                     "sentence": "<Parse Error>",
+                    "gold": "<Parse Error>",
                     "correct": False,
-                    "tree": {"name": f"Top-level error: {str(e)}"}
+                    "tree": {"name": f"Top-level error: {str(e)}"},
+                    "sem_tree": {"name": f"Top-level error: {str(e)}"},
+                    "category": "Parse Error",
+                    "output": "<Parse Error>",
+                    "gold": "<Parse Error>",
                 })
 
     return jsonify(response)
