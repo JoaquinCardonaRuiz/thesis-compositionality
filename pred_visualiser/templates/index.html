@@ -1,451 +1,557 @@
-<!DOCTYPE html>
-<html lang="en" data-bs-theme="light">
-<head>
-  <meta charset="UTF-8">
-  <title>TSV Tree Viewer</title>
-  <script src="https://d3js.org/d3.v7.min.js"></script>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-  <style>
-    :root[data-bs-theme='light'] {
-      --node-text-color: #333;
-      --sub-index-color: gray;
-    }
-    :root[data-bs-theme='dark'] {
-      --node-text-color: #ddd;
-      --sub-index-color: #aaa;
-    }
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      overflow: hidden;
-      font-family: 'Inter', 'Segoe UI', sans-serif;
-    }
-    body {
-      display: flex;
-    }
-    #sidebar {
-      width: 30%;
-      border-right: 1px solid #ccc;
-      padding: 1em;
-      background-color: var(--bs-body-bg);
-      display: flex;
-      flex-direction: column;
-    }
-    #rowList {
-      flex: 1;
-      overflow-y: auto;
-    }
-    #viewer {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    #treeViz {
-      flex: 1;
-      overflow: hidden;
-    }
-    #treeViz svg {
-      width: 100%;
-      height: 100%;
-      cursor: grab;
-    }
-    .correct { border-left: 4px solid #198754; }
-    .incorrect { border-left: 4px solid #dc3545; }
-    #sentenceLabel {
-      color: var(--node-text-color);
-      font-size: 20px;
-      margin: 0.5em 0;
-      text-align: center;
-    }
-    .word-block {
-      display: inline-block;
-      text-align: center;
-      margin-right: 10px;
-    }
-    .word-block span { display: block; }
-    .node-label { fill: var(--node-text-color); }
-    .sub-index { fill: var(--sub-index-color); font-size: 12px; }
-  </style>
-</head>
-<body>
-<div id="sidebar">
-  <div class="toggle-container d-flex gap-2 align-items-center mb-3">
-    <h5 class="mb-0">Visualise Model Predictions</h5>
-    <button id="themeToggle" class="btn btn-outline-secondary btn-sm ms-auto">🌙</button>
-  </div>
-  <div class="filters-container d-flex gap-2 mb-3">
-    <select id="fileSelect" class="form-select"></select>
-    <select id="filterSelect" class="form-select">
-      <option value="all">Show All</option>
-      <option value="correct">Correct</option>
-      <option value="incorrect">Incorrect</option>
-    </select>
-    <select id="catSelect" class="form-select"></select>
-  </div>
-  <h6>Rows</h6>
-  <div id="rowList" class="list-group"></div>
-</div>
-<div id="viewer">
-  <div id="sentenceLabel"></div>
-  <div id="treeViz"></div>
-</div>
-<script>
-  let currentRows = [];
-
-  async function loadFiles() {
-    const res = await fetch('/api/files');
-    const files = await res.json();
-    const select = document.getElementById('fileSelect');
-    select.innerHTML = files.map(f => `<option value="${f}">${f}</option>`).join('');
-    select.addEventListener('change', () => loadFile(select.value));
-    if (files.length > 0) loadFile(files[0]);
-  }
-
-  async function loadFile(filename) {
-    const res = await fetch(`/api/file/${filename}`);
-    currentRows = await res.json();
-
-    const catSelect = document.getElementById('catSelect');
-    const categories = Array.from(new Set(currentRows.map(row => row.category)));
-    catSelect.innerHTML = `<option value="all">Show All</option>` + categories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
-
-    updateRowList();
-  }
-
-
-  function updateRowList() {
-    const filter = document.getElementById('filterSelect').value;
-    const category = document.getElementById('catSelect').value;
-
-    const list = document.getElementById('rowList');
-    list.innerHTML = '';
-    currentRows.forEach((row, idx) => {
-      const isCorrect = row.correct;
-      if ((filter === 'correct' && !isCorrect) || (filter === 'incorrect' && isCorrect)) return;
-      if (category !== 'all' && row.category !== category) return;
-
-      const cls = isCorrect ? 'correct' : 'incorrect';
-      const item = document.createElement('div');
-      item.className = `list-group-item list-group-item-action d-flex justify-content-between align-items-center ${cls}`;
-
-      const btn = document.createElement('button');
-      btn.className = 'btn flex-grow-1 text-start p-0';
-      btn.textContent = row.sentence;
-      
-      const categoryText = document.createElement('span');
-      categoryText.className = 'badge bg-light text-dark';
-      categoryText.textContent = row.category.length > 16 ? row.category.substring(0, 16) + '...' : row.category;
-      categoryText.title = row.category;
-      
-      item.onclick = () => viewRow(row);
-      
-      item.appendChild(btn);
-      item.appendChild(categoryText);
-
-      list.appendChild(item);
-    });
-  }
-
-  function viewRow(row) {
-    try {
-      displaySentence(row.sentence);
-      d3.select("#treeViz").html("<svg></svg>");
-      const outerSvg = d3.select("svg")
-        .attr("width", 3000)
-        .attr("height", 800)
-        .call(d3.zoom()
-          .scaleExtent([0.2, 3])
-          .on("zoom", (event) => {
-            g.attr("transform", event.transform);
-          }));
-      const g = outerSvg.append("g").attr("transform", "translate(0,0)");
-      const svg = g
-        .attr("transform", "translate(0,0)");
-      let xoffset = 50;
-      xoffset = renderSpan2TokenTable(row.tree.span2output_token, svg, xoffset);
-      xoffset = renderSyntaxTree(row.tree, svg, xoffset);
-      xoffset = renderSemTree(row.tree, svg, xoffset);
-      xoffset = renderLabelSemTree(row.sem_tree, svg, xoffset);
-      xoffset = renderOutputTable(row.output, row.gold, svg, xoffset);
-    } catch (e) {
-      document.getElementById('treeViz').textContent = 'Render Error: ' + e;
-    }
-  }
-
-  function displaySentence(sentence) {
-    const words = sentence.trim().split(/\s+/);
-    const container = document.getElementById('sentenceLabel');
-    container.style.marginLeft = '25px';
-    container.style.marginRight = '25px';
-    container.style.marginTop = '20px';
-    container.innerHTML = words.map((word, idx) => `
-      <div class="word-block">
-        <span>${word}</span>
-        <span style="font-size: 12px">${idx}</span>
-      </div>`
-    ).join('');
-  }
-
-  document.getElementById('themeToggle').addEventListener('click', () => {
-    const html = document.documentElement;
-    const current = html.getAttribute('data-bs-theme');
-    const newTheme = current === 'light' ? 'dark' : 'light';
-    html.setAttribute('data-bs-theme', newTheme);
-    document.getElementById('themeToggle').textContent = newTheme === 'light' ? '🌙' : '☀️';
-    const badges = document.querySelectorAll('.badge');
-    badges.forEach(badge => {
-      if (newTheme === 'dark') {
-        badge.classList.remove('bg-light', 'text-dark');
-        badge.classList.add('bg-dark', 'text-light');
-      } else {
-        badge.classList.remove('bg-dark', 'text-light');
-        badge.classList.add('bg-light', 'text-dark');
+  <!DOCTYPE html>
+  <html lang="en" data-bs-theme="light">
+  <head>
+    <meta charset="UTF-8">
+    <title>TSV Tree Viewer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <style>
+      :root[data-bs-theme='light'] {
+        --node-text-color: #333;
+        --sub-index-color: gray;
       }
-    });
-  });
+      :root[data-bs-theme='dark'] {
+        --node-text-color: #ddd;
+        --sub-index-color: #aaa;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        font-family: 'Inter', 'Segoe UI', sans-serif;
+      }
+      body {
+        display: flex;
+      }
+      #sidebar {
+        width: 30%;
+        border-right: 1px solid #ccc;
+        padding: 1em;
+        background-color: var(--bs-body-bg);
+        display: flex;
+        flex-direction: column;
+      }
+      #rowList {
+        flex: 1;
+        overflow-y: auto;
+      }
+      #viewer {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      #treeViz {
+        flex: 1;
+        overflow: hidden;
+      }
+      #treeViz svg {
+        width: 100%;
+        height: 100%;
+        cursor: grab;
+      }
+      .correct { border-left: 4px solid #198754; }
+      .incorrect { border-left: 4px solid #dc3545; }
+      #sentenceLabel {
+        color: var(--node-text-color);
+        font-size: 20px;
+        margin: 0.5em 0;
+        text-align: center;
+      }
+      .word-block {
+        display: inline-block;
+        text-align: center;
+        margin-right: 10px;
+      }
+      .word-block span { display: block; }
+      .node-label { fill: var(--node-text-color); }
+      .sub-index { fill: var(--sub-index-color); font-size: 12px; }
 
-  document.getElementById('filterSelect').addEventListener('change', updateRowList);
-  document.getElementById('catSelect').addEventListener('change', updateRowList);
+      pre#jsonDisplay {
+        font-family: monospace;
+        font-size: 14px;
+        line-height: 1.5;
+        background-color: #f8f9fa;
+        padding: 1em;
+        border-radius: 4px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+      }
+      .json-key      { color: #6a1b9a; font-weight: bold; }
+      .json-string   { color: #2a7bde; }
+      .json-number   { color: #c62828; }
+      .json-boolean  { color: #2e7d32; font-weight: bold; }
+      .json-null     { color: #757575; font-style: italic; }
+    </style>
+  </head>
+  <body>
+  <div id="sidebar">
+    <div class="toggle-container d-flex gap-2 align-items-center mb-3">
+      <h5 class="mb-0">Visualise Model Predictions</h5>
+      <button id="themeToggle" class="btn btn-outline-secondary btn-sm ms-auto">🌙</button>
+    </div>
+    <div class="filters-container d-flex gap-2 mb-3">
+      <select id="fileSelect" class="form-select"></select>
+      <select id="filterSelect" class="form-select">
+        <option value="all">Show All</option>
+        <option value="correct">Correct</option>
+        <option value="incorrect">Incorrect</option>
+      </select>
+      <select id="catSelect" class="form-select"></select>
+    </div>
+    <h6 id="sentListTitle">Sentences </h6>
+    <div id="rowList" class="list-group"></div>
+  </div>
+  <div id="viewer">
+    <div id="sentenceLabel"></div>
+    <div id="treeViz"></div>
+  </div>
+  <div class="p-2 text-end">
+    <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#jsonModal">View Full JSON</button>
+  </div>
+  <script>
+    let currentRows = [];
 
-  function renderSpan2TokenTable(span2token, svg, xoffset) {
-    const group = svg.append("g").attr("transform", `translate(${xoffset}, 300)`);
-    group.append("text").text("Span2OutputToken Table").attr("y", -20).attr("class", "node-label");
+    async function loadFiles() {
+      const res = await fetch('/api/files');
+      const files = await res.json();
+      const select = document.getElementById('fileSelect');
+      select.innerHTML = files.map(f => `<option value="${f}">${f}</option>`).join('');
+      select.addEventListener('change', () => loadFile(select.value));
+      if (files.length > 0) loadFile(files[0]);
+    }
 
-    const tableContainer = group.append("foreignObject").attr("width", 300).attr("height", 600)
-      .append("xhtml:div");
-    const table = document.createElement("table");
-    table.className = "table table-bordered table-sm";
-    table.style.fontSize = "18px";
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>Span</th><th>Token</th></tr>";
-    table.appendChild(thead);
+    async function loadFile(filename) {
+      const res = await fetch(`/api/file/${filename}`);
+      currentRows = await res.json();
 
-    const tbody = document.createElement("tbody");
-    span2token.forEach(([span, token]) => {
-      const row = document.createElement("tr");
-      row.innerHTML = `<td>[${span.join(', ')}]</td><td>${token}</td>`;
-      tbody.appendChild(row);
-    });
-    table.appendChild(tbody);
-    tableContainer.each(function() {
-      this.appendChild(table);
-    });
+      const catSelect = document.getElementById('catSelect');
+      const categories = Array.from(new Set(currentRows.map(row => row.category)));
+      catSelect.innerHTML = `<option value="all">Show All</option>` + categories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
 
-    return xoffset + 200;
-  }
+      updateRowList();
+    }
 
-  function renderSyntaxTree(data, svg, xoffset) {
-    const g = svg.append("g").attr("transform", `translate(${xoffset}, 80)`);
-    const root = d3.hierarchy(data);
-    d3.tree().size([600, 700])(root);
-    root.each(d => d.x += 300);
+    function calculateAccuracy() {
+      const filter = document.getElementById('filterSelect').value;
+      const category = document.getElementById('catSelect').value;
 
-    g.selectAll(".link2")
-      .data(root.links())
-      .enter().append("path")
-      .attr("class", "link2")
-      .attr("fill", "none")
-      .attr("stroke", "#ccc")
-      .attr("d", d3.linkVertical().x(d => d.x).y(d => d.y));
+      let relevantRows = currentRows.filter(row => {
+        if (category !== 'all' && row.category !== category) return false;
+        return true;
+      });
 
-    const node2 = g.selectAll(".node2")
-      .data(root.descendants())
-      .enter().append("g")
-      .attr("class", "node2")
-      .attr("transform", d => `translate(${d.x},${d.y})`);
+      if (relevantRows.length === 0) {
+        document.getElementById('sentListTitle').textContent = `Sentences (Accuracy: N/A)`;
+        return;
+      }
 
-    node2.append("circle")
-      .attr("r", 10)
-      .attr("fill", "#ccc");
+      const correctCount = relevantRows.filter(row => row.correct).length;
+      const accuracy = Math.round((correctCount / relevantRows.length) * 100);
+      document.getElementById('sentListTitle').textContent = `Sentences (Accuracy: ${accuracy}%)`;
+    }
 
-    node2.each(function(d) {
-      const labelGroup = d3.select(this).append("g")
-        .attr("transform", `translate(25, -25)`);
-      let xCursor = 0;
-      d.data.tokens.forEach(([word, idx]) => {
-        const wordGroup = labelGroup.append("g").attr("transform", `translate(${xCursor}, 0)`);
-        const wordText = wordGroup.append("text")
-          .attr("class", "node-label")
-          .attr("y", 0)
-          .attr("text-anchor", "start")
-          .text(word);
-        wordGroup.append("text")
-          .attr("y", 14)
-          .attr("text-anchor", "start")
-          .attr("class", "sub-index")
-          .text(idx);
-        const wordWidth = wordText.node().getComputedTextLength();
-        xCursor += wordWidth + 10;
+
+    function updateRowList() {
+      const filter = document.getElementById('filterSelect').value;
+      const category = document.getElementById('catSelect').value;
+
+      const list = document.getElementById('rowList');
+      list.innerHTML = '';
+      currentRows.forEach((row, idx) => {
+        const isCorrect = row.correct;
+        if ((filter === 'correct' && !isCorrect) || (filter === 'incorrect' && isCorrect)) return;
+        if (category !== 'all' && row.category !== category) return;
+
+        const cls = isCorrect ? 'correct' : 'incorrect';
+        const item = document.createElement('div');
+        item.className = `list-group-item list-group-item-action d-flex justify-content-between align-items-center ${cls}`;
+
+        const btn = document.createElement('button');
+        btn.className = 'btn flex-grow-1 text-start p-0';
+        btn.textContent = row.sentence;
+        
+        const categoryText = document.createElement('span');
+        categoryText.className = 'badge bg-light text-dark';
+        categoryText.textContent = row.category.length > 16 ? row.category.substring(0, 16) + '...' : row.category;
+        categoryText.title = row.category;
+        categoryText.onclick = (event) => {
+          event.stopPropagation();
+          document.getElementById('catSelect').value = row.category;
+          updateRowList();
+        };
+        
+        item.onclick = () => viewRow(row);
+        
+        item.appendChild(btn);
+        item.appendChild(categoryText);
+
+        list.appendChild(item);
+      });
+      calculateAccuracy(); 
+    }
+
+    function viewRow(row) {
+      try {
+        displaySentence(row.sentence);
+        d3.select("#treeViz").html("<svg></svg>");
+        const outerSvg = d3.select("svg")
+          .attr("width", 3000)
+          .attr("height", 800)
+          .call(d3.zoom()
+            .scaleExtent([0.2, 3])
+            .on("zoom", (event) => {
+              g.attr("transform", event.transform);
+            }));
+        const g = outerSvg.append("g").attr("transform", "translate(0,0)");
+        const svg = g
+          .attr("transform", "translate(0,0)");
+        let xoffset = 50;
+        xoffset = renderSpan2TokenTable(row.tree.span2output_token, svg, xoffset);
+        xoffset = renderSyntaxTree(row.tree, svg, xoffset);
+        xoffset = renderSemTree(row.tree, svg, xoffset);
+        xoffset = renderLabelSemTree(row.sem_tree, svg, xoffset);
+        xoffset = renderOutputTable(row.output, row.gold, svg, xoffset);
+        document.getElementById('jsonDisplay').innerHTML = highlightJson(formatJsonCustom(row.full_json));
+      } catch (e) {
+        document.getElementById('treeViz').textContent = 'Render Error: ' + e;
+      }
+    }
+
+    function displaySentence(sentence) {
+      const words = sentence.trim().split(/\s+/);
+      const container = document.getElementById('sentenceLabel');
+      container.style.marginLeft = '25px';
+      container.style.marginRight = '25px';
+      container.style.marginTop = '20px';
+      container.innerHTML = words.map((word, idx) => `
+        <div class="word-block">
+          <span>${word}</span>
+          <span style="font-size: 12px">${idx}</span>
+        </div>`
+      ).join('');
+    }
+
+    document.getElementById('themeToggle').addEventListener('click', () => {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-bs-theme');
+      const newTheme = current === 'light' ? 'dark' : 'light';
+      html.setAttribute('data-bs-theme', newTheme);
+
+      document.getElementById('themeToggle').textContent = newTheme === 'light' ? '🌙' : '☀️';
+      // change jsonDisplay background-color
+      const jsonDisplay = document.getElementById('jsonDisplay');
+      jsonDisplay.style.backgroundColor = newTheme === 'dark' ? '#212529' : '#f8f9fa';
+      
+      
+      const badges = document.querySelectorAll('.badge');
+      badges.forEach(badge => {
+        if (newTheme === 'dark') {
+          badge.classList.remove('bg-light', 'text-dark');
+          badge.classList.add('bg-dark', 'text-light');
+        } else {
+          badge.classList.remove('bg-dark', 'text-light');
+          badge.classList.add('bg-light', 'text-dark');
+        }
       });
     });
 
-    return xoffset + 500 + (data.tokens.length * 50);
-  }
+    document.getElementById('filterSelect').addEventListener('change', updateRowList);
+    document.getElementById('catSelect').addEventListener('change', updateRowList);
 
-  function renderSemTree(data, svg, xoffset) {
-    const g = svg.append("g").attr("transform", `translate(${xoffset}, 80)`);
-    const root = d3.hierarchy(data);
-    d3.tree().size([600, 700])(root);
-    root.each(d => d.x += 300);
+    function renderSpan2TokenTable(span2token, svg, xoffset) {
+      const group = svg.append("g").attr("transform", `translate(${xoffset}, 300)`);
+      group.append("text").text("Span2OutputToken Table").attr("y", -20).attr("class", "node-label");
 
-    g.selectAll(".link1")
-      .data(root.links())
-      .enter().append("path")
-      .attr("class", "link1")
-      .attr("fill", "none")
-      .attr("stroke", "#ccc")
-      .attr("d", d3.linkVertical().x(d => d.x).y(d => d.y));
+      const tableContainer = group.append("foreignObject").attr("width", 300).attr("height", 600)
+        .append("xhtml:div");
+      const table = document.createElement("table");
+      table.className = "table table-bordered table-sm";
+      table.style.fontSize = "18px";
+      const thead = document.createElement("thead");
+      thead.innerHTML = "<tr><th>Span</th><th>Token</th></tr>";
+      table.appendChild(thead);
 
-    const node = g.selectAll(".node")
-      .data(root.descendants())
-      .enter().append("g")
-      .attr("class", "node")
-      .attr("transform", d => `translate(${d.x},${d.y})`);
-
-    node.append("circle")
-      .attr("r", 10)
-      .attr("fill", d => d.data.semantic === 'P' ? '#f1948a' : '#82e0aa');
-
-    node.append("text")
-      .attr("text-anchor", "middle")
-      .attr("alignment-baseline", "middle")
-      .attr("font-size", "10px")
-      .attr("class", "node-label")
-      .text(d => d.data.semantic);
-
-    node.each(function(d) {
-      const labelGroup = d3.select(this).append("g")
-        .attr("transform", `translate(25, -25)`);
-      let xCursor = 0;
-      d.data.tokens.forEach(([word, idx]) => {
-        const wordGroup = labelGroup.append("g").attr("transform", `translate(${xCursor}, 0)`);
-        const wordText = wordGroup.append("text")
-          .attr("class", "node-label")
-          .attr("y", 0)
-          .attr("text-anchor", "start")
-          .text(word);
-        wordGroup.append("text")
-          .attr("y", 14)
-          .attr("text-anchor", "start")
-          .attr("class", "sub-index")
-          .text(idx);
-        const wordWidth = wordText.node().getComputedTextLength();
-        xCursor += wordWidth + 10;
+      const tbody = document.createElement("tbody");
+      span2token.forEach(([span, token]) => {
+        const row = document.createElement("tr");
+        row.innerHTML = `<td>[${span.join(', ')}]</td><td>${token}</td>`;
+        tbody.appendChild(row);
       });
-    });
+      table.appendChild(tbody);
+      tableContainer.each(function() {
+        this.appendChild(table);
+      });
 
-    return xoffset + 500 + (data.tokens.length * 50);
-  }
+      return xoffset + 200;
+    }
 
-  function renderLabelSemTree(data, svg, xoffset) {
-    const g = svg.append("g").attr("transform", `translate(${xoffset}, 80)`);
+    function renderSyntaxTree(data, svg, xoffset) {
+      const g = svg.append("g").attr("transform", `translate(${xoffset}, 80)`);
+      const root = d3.hierarchy(data);
+      d3.tree().size([600, 700])(root);
+      root.each(d => d.x += 300);
 
-    const root = d3.hierarchy(data);
-    d3.tree().size([600, 700])(root);
-    root.each(d => d.x += 300);
+      g.selectAll(".link2")
+        .data(root.links())
+        .enter().append("path")
+        .attr("class", "link2")
+        .attr("fill", "none")
+        .attr("stroke", "#ccc")
+        .attr("d", d3.linkVertical().x(d => d.x).y(d => d.y));
 
-    g.selectAll(".link-new")
-      .data(root.links())
-      .enter().append("path")
-      .attr("class", "link-new")
-      .attr("fill", "none")
-      .attr("stroke", "#aaa")
-      .attr("stroke-width", 2)
-      .attr("d", d3.linkVertical().x(d => d.x).y(d => d.y));
+      const node2 = g.selectAll(".node2")
+        .data(root.descendants())
+        .enter().append("g")
+        .attr("class", "node2")
+        .attr("transform", d => `translate(${d.x},${d.y})`);
 
-    g.selectAll(".rel-label")
-      .data(root.links())
-      .enter().append("text")
-      .attr("class", "node-label")
-      .attr("x", d => (d.source.x + d.target.x) / 2)
-      .attr("y", d => (d.source.y + d.target.y) / 2 - 5)
-      .attr("text-anchor", "middle")
-      .attr("font-size", "10px")
-      .text(d => d.target.data.rel);
+      node2.append("circle")
+        .attr("r", 10)
+        .attr("fill", "#ccc");
 
-    const node = g.selectAll(".node-new")
-      .data(root.descendants())
-      .enter().append("g")
-      .attr("class", "node-new")
-      .attr("transform", d => `translate(${d.x},${d.y})`);
+      node2.each(function(d) {
+        const labelGroup = d3.select(this).append("g")
+          .attr("transform", `translate(25, -25)`);
+        let xCursor = 0;
+        d.data.tokens.forEach(([word, idx]) => {
+          const wordGroup = labelGroup.append("g").attr("transform", `translate(${xCursor}, 0)`);
+          const wordText = wordGroup.append("text")
+            .attr("class", "node-label")
+            .attr("y", 0)
+            .attr("text-anchor", "start")
+            .text(word);
+          wordGroup.append("text")
+            .attr("y", 14)
+            .attr("text-anchor", "start")
+            .attr("class", "sub-index")
+            .text(idx);
+          const wordWidth = wordText.node().getComputedTextLength();
+          xCursor += wordWidth + 10;
+        });
+      });
 
-    node.append("circle")
-      .attr("r", 10)
-      .attr("fill", d => d.data.class === 'P' ? '#f1948a' : '#82e0aa');
+      return xoffset + 500 + (data.tokens.length * 50);
+    }
 
-    node.append("text")
-      .attr("text-anchor", "middle")
-      .attr("alignment-baseline", "middle")
-      .attr("font-size", "10px")
-      .attr("class", "node-label")
-      .text(d => d.data.class);
+    function renderSemTree(data, svg, xoffset) {
+      const g = svg.append("g").attr("transform", `translate(${xoffset}, 80)`);
+      const root = d3.hierarchy(data);
+      d3.tree().size([600, 700])(root);
+      root.each(d => d.x += 300);
 
-    node.append("text")
-      .attr("text-anchor", "start")
-      .attr("alignment-baseline", "hanging")
-      .attr("dx", 15)
-      .attr("dy", -5)
-      .attr("font-size", "12px")
-      .attr("class", "node-label")
-      .text(d => d.data.token);
+      g.selectAll(".link1")
+        .data(root.links())
+        .enter().append("path")
+        .attr("class", "link1")
+        .attr("fill", "none")
+        .attr("stroke", "#ccc")
+        .attr("d", d3.linkVertical().x(d => d.x).y(d => d.y));
 
-      return xoffset + 1500 ;
-  }
+      const node = g.selectAll(".node")
+        .data(root.descendants())
+        .enter().append("g")
+        .attr("class", "node")
+        .attr("transform", d => `translate(${d.x},${d.y})`);
 
-  function renderOutputTable(output, gold, svg, xoffset) {
-    const group = svg.append("g").attr("transform", `translate(${xoffset}, 300)`);
-    group.append("text").text("Output vs Gold Table").attr("y", -20).attr("class", "node-label").style("font-size", "24px");
+      node.append("circle")
+        .attr("r", 10)
+        .attr("fill", d => d.data.semantic === 'P' ? '#f1948a' : '#82e0aa');
 
-    const tableContainer = group.append("foreignObject").attr("width", 3500).attr("height", 300)
-      .append("xhtml:div");
-    const table = document.createElement("table");
-    table.className = "table table-bordered table-sm";
-    table.style.fontSize = "14px";
-    table.style.width = "auto"; // Prevent stretching for short tables
+      node.append("text")
+        .attr("text-anchor", "middle")
+        .attr("alignment-baseline", "middle")
+        .attr("font-size", "10px")
+        .attr("class", "node-label")
+        .text(d => d.data.semantic);
 
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th></th>" + Array.from({ length: Math.max(output.length, gold.length) }, (_, i) => `<th>${i}</th>`).join('') + "</tr>";
-    table.appendChild(thead);
+      node.each(function(d) {
+        const labelGroup = d3.select(this).append("g")
+          .attr("transform", `translate(25, -25)`);
+        let xCursor = 0;
+        d.data.tokens.forEach(([word, idx]) => {
+          const wordGroup = labelGroup.append("g").attr("transform", `translate(${xCursor}, 0)`);
+          const wordText = wordGroup.append("text")
+            .attr("class", "node-label")
+            .attr("y", 0)
+            .attr("text-anchor", "start")
+            .text(word);
+          wordGroup.append("text")
+            .attr("y", 14)
+            .attr("text-anchor", "start")
+            .attr("class", "sub-index")
+            .text(idx);
+          const wordWidth = wordText.node().getComputedTextLength();
+          xCursor += wordWidth + 10;
+        });
+      });
 
-    const tbody = document.createElement("tbody");
+      return xoffset + 500 + (data.tokens.length * 50);
+    }
 
-    const outputRow = document.createElement("tr");
-    const goldRow = document.createElement("tr");
+    function renderLabelSemTree(data, svg, xoffset) {
+      const g = svg.append("g").attr("transform", `translate(${xoffset}, 80)`);
 
-    outputRow.innerHTML = `<td style="font-weight: bold;">Output</td>`;
-    goldRow.innerHTML = `<td style="font-weight: bold;">Gold</td>`;
+      const root = d3.hierarchy(data);
+      d3.tree().size([600, 700])(root);
+      root.each(d => d.x += 300);
 
-    Array.from({ length: Math.max(output.length, gold.length) }, (_, i) => {
-      const outputCell = document.createElement("td");
-      const goldCell = document.createElement("td");
+      g.selectAll(".link-new")
+        .data(root.links())
+        .enter().append("path")
+        .attr("class", "link-new")
+        .attr("fill", "none")
+        .attr("stroke", "#aaa")
+        .attr("stroke-width", 2)
+        .attr("d", d3.linkVertical().x(d => d.x).y(d => d.y));
 
-      outputCell.textContent = output[i] || '';
-      goldCell.textContent = gold[i] || '';
+      g.selectAll(".rel-label")
+        .data(root.links())
+        .enter().append("text")
+        .attr("class", "node-label")
+        .attr("x", d => (d.source.x + d.target.x) / 2)
+        .attr("y", d => (d.source.y + d.target.y) / 2 - 5)
+        .attr("text-anchor", "middle")
+        .attr("font-size", "10px")
+        .text(d => d.target.data.rel);
 
-      // Highlight mismatched cells 
-      if ((output[i] || '') !== (gold[i] || '')) {
-        outputCell.style.backgroundColor = "#e07777";
-        goldCell.style.backgroundColor = "#e07777";
+      const node = g.selectAll(".node-new")
+        .data(root.descendants())
+        .enter().append("g")
+        .attr("class", "node-new")
+        .attr("transform", d => `translate(${d.x},${d.y})`);
+
+      node.append("circle")
+        .attr("r", 10)
+        .attr("fill", d => d.data.class === 'P' ? '#f1948a' : '#82e0aa');
+
+      node.append("text")
+        .attr("text-anchor", "middle")
+        .attr("alignment-baseline", "middle")
+        .attr("font-size", "10px")
+        .attr("class", "node-label")
+        .text(d => d.data.class);
+
+      node.append("text")
+        .attr("text-anchor", "start")
+        .attr("alignment-baseline", "hanging")
+        .attr("dx", 15)
+        .attr("dy", -5)
+        .attr("font-size", "12px")
+        .attr("class", "node-label")
+        .text(d => d.data.token);
+
+        return xoffset + 1500 ;
+    }
+
+    function renderOutputTable(output, gold, svg, xoffset) {
+      const group = svg.append("g").attr("transform", `translate(${xoffset}, 300)`);
+      group.append("text").text("Output vs Gold Table").attr("y", -20).attr("class", "node-label").style("font-size", "24px");
+
+      const tableContainer = group.append("foreignObject").attr("width", 3500).attr("height", 300)
+        .append("xhtml:div");
+      const table = document.createElement("table");
+      table.className = "table table-bordered table-sm";
+      table.style.fontSize = "14px";
+      table.style.width = "auto"; // Prevent stretching for short tables
+
+      const thead = document.createElement("thead");
+      thead.innerHTML = "<tr><th></th>" + Array.from({ length: Math.max(output.length, gold.length) }, (_, i) => `<th>${i}</th>`).join('') + "</tr>";
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+
+      const outputRow = document.createElement("tr");
+      const goldRow = document.createElement("tr");
+
+      outputRow.innerHTML = `<td style="font-weight: bold;">Output</td>`;
+      goldRow.innerHTML = `<td style="font-weight: bold;">Gold</td>`;
+
+      Array.from({ length: Math.max(output.length, gold.length) }, (_, i) => {
+        const outputCell = document.createElement("td");
+        const goldCell = document.createElement("td");
+
+        outputCell.textContent = output[i] || '';
+        goldCell.textContent = gold[i] || '';
+
+        // Highlight mismatched cells 
+        if ((output[i] || '') !== (gold[i] || '')) {
+          outputCell.style.backgroundColor = "#e07777";
+          goldCell.style.backgroundColor = "#e07777";
+        }
+
+        outputRow.appendChild(outputCell);
+        goldRow.appendChild(goldCell);
+      });
+
+      tbody.appendChild(outputRow);
+      tbody.appendChild(goldRow);
+
+      table.appendChild(tbody);
+      tableContainer.each(function() {
+        this.appendChild(table);
+      });
+      return xoffset + 200;
+    }
+
+    function formatJsonCustom(obj, indent = 2, level = 0, inArray = false) {
+      const space = ' '.repeat(indent * level);
+      const nextLevel = level + 1;
+      const nextSpace = ' '.repeat(indent * nextLevel);
+
+      if (Array.isArray(obj)) {
+        const allSimple = obj.every(el => typeof el !== 'object' || el === null || Array.isArray(el));
+        if (allSimple) {
+          return '[' + obj.map(el => formatJsonCustom(el, indent, 0)).join(', ') + ']';
+        } else {
+          const items = obj.map(el => {
+            const formatted = formatJsonCustom(el, indent, nextLevel, true);
+            return `${nextSpace}${formatted}`;
+          });
+          return '[\n' + items.join(',\n') + '\n' + space + ']';
+        }
+      } else if (typeof obj === 'object' && obj !== null) {
+        const entries = Object.entries(obj).map(([key, val]) => {
+          const formattedVal = formatJsonCustom(val, indent, nextLevel);
+          return `${nextSpace}"${key}": ${formattedVal}`;
+        });
+        return '{\n' + entries.join(',\n') + '\n' + space + '}';
       }
 
-      outputRow.appendChild(outputCell);
-      goldRow.appendChild(goldCell);
-    });
+      return JSON.stringify(obj);
+    }
 
-    tbody.appendChild(outputRow);
-    tbody.appendChild(goldRow);
+    function highlightJson(jsonStr) {
+      return jsonStr.replace(/("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b(true|false|null)\b|[-]?\d+(\.\d+)?([eE][+\-]?\d+)?)/g, match => {
+        if (/^"/.test(match)) {
+          return /:$/.test(match)
+            ? `<span class="json-key">${match}</span>`   // key
+            : `<span class="json-string">${match}</span>`; // string
+        }
+        if (/true|false/.test(match)) return `<span class="json-boolean">${match}</span>`;
+        if (/null/.test(match)) return `<span class="json-null">${match}</span>`;
+        return `<span class="json-number">${match}</span>`;
+      });
+}
 
-    table.appendChild(tbody);
-    tableContainer.each(function() {
-      this.appendChild(table);
-    });
-    return xoffset + 200;
-  }
 
-  window.onload = loadFiles;
-</script>
-</body>
-</html>
+    window.onload = loadFiles;
+  </script>
+  <div class="modal fade" id="jsonModal" tabindex="-1" aria-labelledby="jsonModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="jsonModalLabel">Full JSON</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <pre id="jsonDisplay" style="white-space: pre-wrap;"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  </body>
+  </html>

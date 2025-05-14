@@ -472,7 +472,7 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                 # select the action with the highest score
                 # and update the span_start_end_batch and reduce_span_in_all_span_batchs
                 # so  if  we're merging spans [2,3] + [4,4] → new span is [2,4]
-                # wee update span_start_end_batch to be [ [0,0], [1,1], [2,4], [5,5] ...]
+                # we update span_start_end_batch to be [ [0,0], [1,1], [2,4], [5,5] ...]
                 action_idx = actions[in_batch_idx].argmax().item()
                 span_start_end = span_start_end_batch[in_batch_idx]
                 merged_span = [span_start_end[action_idx][0], span_start_end[action_idx + 1][1]]
@@ -1116,6 +1116,16 @@ class HRLModel(nn.Module):
 
             batch_forward_info.append([normalized_entropy, log_prob, reward])
 
+            '''
+            if pair[0] == 'a visitor gave a cookie to the girl that emma rolled':
+                import pickle
+                with open("debug_info.pkl", "wb") as f:
+                    pickle.dump(span2semantic[str(end_span)], f)
+                print("Saved debug info")
+                print(pred_chain)
+                quit()
+            '''
+            
         # pdb.set_trace()
         state = {
             "bottom_span": bottom_span,
@@ -1343,7 +1353,7 @@ class HRLModel(nn.Module):
                 except ValueError:  
                     print(sentence_info)
                     raise ValueError(f"Key {rel} not found in result: {result}")
-                result.insert(ix, 'that')
+                result.insert(ix, 'nmod')
 
             # place nmods
             for key in nmods.keys():

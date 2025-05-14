@@ -576,9 +576,6 @@ def train_model(args, task_name, logger):
 
     train_data.sort(key=lambda p: len(p[0].split()))
 
-    # DELETE THIS
-    train_data = train_data[:1000]
-
     dev_data = list(set([tuple(item) for item in dev_data]))
     dev_data.sort(key=lambda p: len(p[0].split()))
     dev_data = [list(item) for item in dev_data]

@@ -84,6 +84,7 @@ def load_file(filename):
                     "category": parsed_row.get("category"),
                     "output": parsed_row.get("pred_chain"),
                     "gold": parsed_row.get("label_chain"),
+                    "full_json": parsed_row,
                 })
             except Exception as e:
                 response.append({
@@ -95,6 +96,7 @@ def load_file(filename):
                     "category": "Parse Error",
                     "output": "<Parse Error>",
                     "gold": "<Parse Error>",
+                    "full_json": {"error": str(e)},
                 })
 
     return jsonify(response)
