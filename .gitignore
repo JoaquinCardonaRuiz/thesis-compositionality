@@ -3,6 +3,11 @@ LEAR/COGS_experiment/slog_data
 LEAR/COGS_experiment/checkpoint
 LEAR/COGS_experiment/__pycache__
 LEAR/COGS_experiment/modules/__pycache__
-gh_token
+
+LEAR/DeAR_experiment/cogs_data
+LEAR/DeAR_experiment/slog_data
+LEAR/DeAR_experiment/checkpoint
+LEAR/DeAR_experiment/__pycache__
+LEAR/DeAR_experiment/modules/__pycache__gh_token
 test.py
 test_results.txt
