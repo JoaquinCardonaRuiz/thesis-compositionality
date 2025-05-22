@@ -453,13 +453,11 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
             # for test
             # train_pair[0] = "emma liked that a girl liked that the cat was rented a cake on a chair on the computer by michael"
             # for test
-
-            tokens_list = [indexes_from_sentence(input_lang, train_pair[0], 'input')]
+            tokens_list = indexes_from_sentence(input_lang, train_pair[0], 'input')
             tokens = Variable(torch.LongTensor(tokens_list))
             # pdb.set_trace()
             if USE_CUDA:
                 tokens = tokens.cuda()
-
             batch_forward_info, pred_chain, label_chain, _ = \
                 model(train_pair, tokens, sample_num, is_test=False, epoch=epoch)
 

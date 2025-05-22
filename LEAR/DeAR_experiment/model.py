@@ -36,200 +36,59 @@ class E:  # Entities (M0~M9)
     # 0: in
     # 1: on
     # 2: beside
-    # 3: recipient theme (E E)
-    # 4: theme recipient (E to E)
-    # 5: theme agent (E by E)
-    # 6: recipient agent (to E by E)
+    # 3: relcl
     def __init__(self, entity):
-        # [in_word/on_word/beside_word, agent_word/theme_word/recipient_word, entity]
-        self.entity_chain = [[None, None, entity]]
-        # entity_class
-        self.entity_para = None
-        self.json_repr = {"children": [], "token": entity, "rel": "", "class": "E"}
+        self.children = []
+        self.token = entity
+        self.rel = None
 
-    def add_E_in(self, E0):
-        left_E = copy.deepcopy(E0)
-        left_E.entity_chain[0][0] = 'in'
-        self.entity_chain = self.entity_chain + left_E.entity_chain
-        self.entity_para = None
-        left_E.json_repr['rel'] = 'in'
-        self.json_repr['children'].append(left_E.json_repr)
+    def add_child(self, child, rel):
+        assert rel in ['in', 'on', 'beside', 'relcl']
+        if rel == 'relcl':
+            assert isinstance(child, P)
+        else:
+            assert isinstance(child, E)
 
-    def add_E_on(self, E0):
-        left_E = copy.deepcopy(E0)
-        left_E.entity_chain[0][0] = 'on'
-        self.entity_chain = self.entity_chain + left_E.entity_chain
-        self.entity_para = None
-        left_E.json_repr['rel'] = 'on'
-        self.json_repr['children'].append(left_E.json_repr)
-
-    def add_E_beside(self, E0):
-        left_E = copy.deepcopy(E0)
-        left_E.entity_chain[0][0] = 'beside'
-        self.entity_chain = self.entity_chain + left_E.entity_chain
-        self.entity_para = None
-        left_E.json_repr['rel'] = 'beside'
-        self.json_repr['children'].append(left_E.json_repr)
-
-    def add_E_recipient_theme(self, E0):
-        self.entity_chain[0][1] = 'recipient'
-        para_E = copy.deepcopy(E0)
-        para_E.entity_chain[0][1] = 'theme'
-        self.entity_para = para_E
-
-    def add_E_theme_recipient(self, E0):
-        self.entity_chain[0][1] = 'theme'
-        para_E = copy.deepcopy(E0)
-        para_E.entity_chain[0][1] = 'recipient'
-        self.entity_para = para_E
-
-    def add_E_theme_agent(self, E0):
-        self.entity_chain[0][1] = 'theme'
-        para_E = copy.deepcopy(E0)
-        para_E.entity_chain[0][1] = 'agent'
-        self.entity_para = para_E
-
-    def add_E_recipient_agent(self, E0):
-        self.entity_chain[0][1] = 'recipient'
-        para_E = copy.deepcopy(E0)
-        para_E.entity_chain[0][1] = 'agent'
-        self.entity_para = para_E
+        child_aux = copy.deepcopy(child)
+        child_aux.rel = rel
+        self.children.append(child_aux)
 
 
 class P:
     def __init__(self, action):
-        # [ccomp_word/xcomp_word, agent_entity_class, theme_entity_class, recipient_entity_class, action_word]
-        self.action_chain = [[None, None, None, None, action]]
+        
+        self.children = []
+        self.token = action
+        self.rel = None
 
-        self.has_agent = False
-        self.has_theme = False
-        self.has_recipient = False
+        self.has_role = {"agent": False, "theme": False, "recipient": False}
+
+        self.is_causative = False
+        self.is_unaccusative = False
 
         self.is_full = False
 
-        self.json_repr = {"children": [], "token": action, "rel": "", "class": "P"}
 
+    def add_child(self, child, rel):
+        assert rel in ['ccomp', 'xcomp', 'agent', 'theme', 'recipient']
+        if rel == 'ccomp' or rel == 'xcomp':
+            assert isinstance(child, P)
+        else:
+            assert isinstance(child, E)
+            if rel == 'agent':
+                self.has_role['agent'] = True
+            elif rel == 'theme':
+                self.has_role['theme'] = True
+            elif rel == 'recipient':
+                self.has_role['recipient'] = True
+            if self.has_role['agent'] and \
+                    self.has_role['theme'] and \
+                    self.has_role['recipient']:
+                self.is_full = True
 
-    def add_E_agent(self, E0):
-        assert E0.entity_para is None
-
-        E_add = copy.deepcopy(E0)
-        E_add.entity_chain[0][1] = 'agent'
-        self.action_chain[0][1] = E_add
-
-        E_add.json_repr['rel'] = 'agent'
-        self.json_repr['children'].append(E_add.json_repr)
-
-    def add_E_theme(self, E0):
-        assert E0.entity_para is None
-
-        E_add = copy.deepcopy(E0)
-        E_add.entity_chain[0][1] = 'theme'
-        self.action_chain[0][2] = E_add
-
-        E_add.json_repr['rel'] = 'theme'
-        self.json_repr['children'].append(E_add.json_repr)
-
-    def add_E_recipient(self, E0):
-        assert E0.entity_para is None
-
-        E_add = copy.deepcopy(E0)
-        E_add.entity_chain[0][1] = 'recipient'
-        self.action_chain[0][3] = E_add
-
-        E_add.json_repr['rel'] = 'recipient'
-        self.json_repr['children'].append(E_add.json_repr)
-
-    def add_E_recipient_theme(self, E0):
-        assert E0.entity_chain[0][1] == 'recipient'
-        assert E0.entity_para.entity_chain[0][1] == 'theme'
-
-        E_add_0 = copy.deepcopy(E0)
-        E_add_1 = copy.deepcopy(E0.entity_para)
-
-        E_add_0.entity_para = None
-        E_add_1.entity_para = None
-
-        self.action_chain[0][3] = E_add_0
-        self.action_chain[0][2] = E_add_1
-
-        E_add_0.json_repr['rel'] = 'recipient'
-        E_add_1.json_repr['rel'] = 'theme'
-        self.json_repr['children'].append(E_add_0.json_repr)
-        self.json_repr['children'].append(E_add_1.json_repr)
-
-    def add_E_theme_recipient(self, E0):
-        assert E0.entity_chain[0][1] == 'theme'
-        assert E0.entity_para.entity_chain[0][1] == 'recipient'
-
-        E_add_0 = copy.deepcopy(E0)
-        E_add_1 = copy.deepcopy(E0.entity_para)
-
-        E_add_0.entity_para = None
-        E_add_1.entity_para = None
-
-        self.action_chain[0][2] = E_add_0
-        self.action_chain[0][3] = E_add_1
-
-        E_add_0.json_repr['rel'] = 'theme'
-        E_add_1.json_repr['rel'] = 'recipient'
-        self.json_repr['children'].append(E_add_0.json_repr)
-        self.json_repr['children'].append(E_add_1.json_repr)
-
-    def add_E_theme_agent(self, E0):
-        assert E0.entity_chain[0][1] == 'theme'
-        assert E0.entity_para.entity_chain[0][1] == 'agent'
-
-        E_add_0 = copy.deepcopy(E0)
-        E_add_1 = copy.deepcopy(E0.entity_para)
-
-        E_add_0.entity_para = None
-        E_add_1.entity_para = None
-
-        self.action_chain[0][2] = E_add_0
-        self.action_chain[0][1] = E_add_1
-
-        E_add_0.json_repr['rel'] = 'theme'
-        E_add_1.json_repr['rel'] = 'agent'
-        self.json_repr['children'].append(E_add_0.json_repr)
-        self.json_repr['children'].append(E_add_1.json_repr)
-
-    def add_E_recipient_agent(self, E0):
-        assert E0.entity_chain[0][1] == 'recipient'
-        assert E0.entity_para.entity_chain[0][1] == 'agent'
-
-        E_add_0 = copy.deepcopy(E0)
-        E_add_1 = copy.deepcopy(E0.entity_para)
-
-        E_add_0.entity_para = None
-        E_add_1.entity_para = None
-
-        self.action_chain[0][3] = E_add_0
-        self.action_chain[0][1] = E_add_1
-
-        E_add_0.json_repr['rel'] = 'recipient'
-        E_add_1.json_repr['rel'] = 'agent'
-        self.json_repr['children'].append(E_add_0.json_repr)
-        self.json_repr['children'].append(E_add_1.json_repr)
-
-
-    def add_P_ccomp(self, P0):
-        P_add = copy.deepcopy(P0)
-        P_add.action_chain[0][0] = 'ccomp'
-
-        self.action_chain = self.action_chain + P_add.action_chain
-
-        P_add.json_repr['rel'] = 'ccomp'
-        self.json_repr['children'].append(P_add.json_repr)
-
-    def add_P_xcomp(self, P0):
-        P_add = copy.deepcopy(P0)
-        P_add.action_chain[0][0] = 'xcomp'
-
-        self.action_chain = self.action_chain + P_add.action_chain
-
-        P_add.json_repr['rel'] = 'xcomp'
-        self.json_repr['children'].append(P_add.json_repr)
+        child_aux = copy.deepcopy(child)
+        child_aux.rel = rel
+        self.children.append(child_aux)
 
 
 class BottomAbstrator(nn.Module):
@@ -240,7 +99,7 @@ class BottomAbstrator(nn.Module):
 
     def forward(self, x):
         bottom_idx = []
-        for position, token in enumerate(x[0]):
+        for position, token in enumerate(x):
             if token.item() in self.alignment_idx:
                 bottom_idx.append(position)
             else:
@@ -259,7 +118,7 @@ class BottomClassifier(nn.Module):
     def forward(self, x, bottom_idx):
         idx2output_token = []
         for idx in bottom_idx:
-            input_idx = x[0, idx].item()
+            input_idx = x[idx].item()
             output_idx = self.alignments_idx[input_idx]
             assert len(output_idx) == 1
             output_idx = output_idx[0]
@@ -267,7 +126,6 @@ class BottomClassifier(nn.Module):
             idx2output_token.append([idx, output_token])
 
         return idx2output_token
-
 
 
 class DepTreeComposer(nn.Module):
@@ -329,7 +187,7 @@ class DepTreeComposer(nn.Module):
         arc_scores = torch.matmul(head_repr, dep_repr.T)  # (S, S)
         return arc_scores
 
-    def forward(self, x):
+    def forward(self, x, bottom_idx):
         """
         Args:
             x: (seq_len,) Tensor of token indices
@@ -339,17 +197,34 @@ class DepTreeComposer(nn.Module):
             log_prob: dummy tensor for API consistency
             head_dep_idx: list of (head, dependent) tuples
         """
+        print(x.shape)
         token_embeds = self.embd_parser(x)  # (S, input_dim)
+        print(token_embeds.shape)
+
         contextualized = self.encode_contextual(token_embeds)  # (S, hidden_dim)
-        arc_scores = self.score_arcs(contextualized)  # (S, S)
+        
+        # bottom_idx is a list containing only the indices of the important tokens
+        # we only keep the embeddings of the important tokens
+        bottom_contextualized = contextualized[bottom_idx]  # (B, hidden_dim) 
+
+        # TODO: Replace with recurrent approach
+        arc_scores = self.score_arcs(bottom_contextualized)  # (B, B)
 
         heads = mst_decode(arc_scores)  # List[int]
         head_dep_idx = [(heads[i], i) for i in range(len(heads))]
 
-        dummy_entropy = torch.tensor(0.0, device=x.device)
-        dummy_log_prob = torch.tensor(0.0, device=x.device)
+        # map to original indices
+        head_dep_idx = [(bottom_idx[head], bottom_idx[dep]) for head, dep in head_dep_idx]
 
-        return dummy_entropy, dummy_log_prob, head_dep_idx
+        idx2contextual = {str(bottom_idx[i]): bottom_contextualized[i] for i in range(bottom_contextualized.size(0))}
+        
+        debug_info = {
+            "x_input": x,
+            "bottom_idx": bottom_idx,
+            "arc_scores": arc_scores,
+            "heads": heads,
+        }
+        return head_dep_idx, idx2contextual, debug_info
 
 
 class Solver(nn.Module):
@@ -359,18 +234,15 @@ class Solver(nn.Module):
     It takes the output of the BottomUpTreeComposer and generates the final output using the semantic classifier.
     """
     # To compose bottom abstractions with rules
-    def __init__(self, hidden_dim, output_lang,
-                 entity_list=[], caus_predicate_list=[], unac_predicate_list=[]):
+    def __init__(self, hidden_dim, output_lang, entity_list=[], caus_predicate_list=[], 
+                 unac_predicate_list=[], relaxed=False, tau_weights=None, straight_through=False, noise=None,
+                eval_actions=None, eval_sr_actions=None, eval_swr_actions=None, debug_info=None):
         super().__init__()
 
         # 0: in
         # 1: on
         # 2: beside
-        # 3: recipient theme (E E)
-        # 4: theme recipient (E to E)
-        # 5: theme agent (E by E)
-        # 6: recipient agent (to E by E)
-        self.semantic_E_E = nn.Linear(in_features=hidden_dim, out_features=7)
+        self.semantic_E_E = nn.Linear(in_features=hidden_dim, out_features=3)
 
         # 0: agent
         # 1: theme
@@ -381,6 +253,7 @@ class Solver(nn.Module):
         # 1: xcomp
         self.semantic_P_P = nn.Linear(in_features=hidden_dim, out_features=2)
 
+        
         self.hidden_dim = hidden_dim
         self.output_lang = output_lang
 
@@ -389,18 +262,48 @@ class Solver(nn.Module):
         self.unac_predicate_list = unac_predicate_list
         self.predicate_list = caus_predicate_list + unac_predicate_list
 
-    def forward(self, pair, span2output_token, parent_child_spans, span2repre,
-                relaxed=False, tau_weights=None, straight_through=False, noise=None,
-                eval_actions=None, eval_sr_actions=None, eval_swr_actions=None, debug_info=None):
+        self.relaxed = relaxed
+        self.tau_weights = tau_weights
+        self.straight_through = straight_through
+        self.noise = noise
+        self.eval_actions = eval_actions
+        self.eval_sr_actions = eval_sr_actions
+        self.eval_swr_actions = eval_swr_actions
+        self.debug_info = debug_info
 
-        # TODO: maybe have bugs when reduce_span is empty
-        # pdb.set_trace()
+    def sort_bottom_up(self, pairs):
+        """ Sort dependent pairs in a bottom-up manner.
+        
+        This is so the tree can be traversed bottom-up and no parent is visited before its children.
+        """
+        # Build parent mapping and collect children
+        parent_map = {dep: head for head, dep in pairs if head != dep}
+        def get_depth(node):
+            depth = 0
+            while node in parent_map and node != parent_map[node]:
+                node = parent_map[node]
+                depth += 1
+            return depth
 
+        # Sort pairs by depth of the dependent node
+        pairs_no_root = [pair for pair in pairs if pair[0] != pair[1]]  # exclude root self-pair
+        return sorted(pairs_no_root, key=lambda pair: get_depth(pair[1]), reverse=True)
+
+    def forward(self, pair, head_dep_idx, idx2contextual, bottom_idx, idx2output_token):
         # returns either E or P instances depending of whether the token is on the entity or predicate list
-        # span2output_token is a list of pairs like [ [1,1], "cake"], [[3,3], "cook"]]
-        # span2semantic is a dictionary of pairs like {"[1, 1]": E("cake"), "[3, 3]": P("cook")}
-        span2semantic = self.init_semantic_class(span2output_token)
+        # idx2output_token is a list of pairs like [ 1, "cake"], [3, "cook"]]
+        # idx2semantic is a dictionary of pairs like {"1": E("cake"), "3": P("cook")}
+        idx2semantic = self.init_semantic_class(idx2output_token)
         # pdb.set_trace()
+
+        # debug prints
+        print(f"===== Input Sentence =====\n{pair[0]}")
+        print(f"===== Input Tree =====\n{head_dep_idx}")
+        print(f"===== Nodes =====\n{bottom_idx}")
+        print(f"===== Semantic =====\n{idx2semantic}")
+        print(f"===== Alignment =====\n{idx2output_token}")
+        quit()
+        # end debug
 
         semantic_normalized_entropy = []
         semantic_log_prob = []
@@ -408,37 +311,28 @@ class Solver(nn.Module):
         noise_i = None
         eval_swr_actions_i = None
 
-        # for every merge made, of form [parent, [child0, child1]], we iterate bottom up through the tree
-        for parent_child_span in parent_child_spans:
-            # extract parent and children
-            parent_span = parent_child_span[0]
-            child0_span = parent_child_span[1][0]
-            child1_span = parent_child_span[1][1]
-            assert child0_span[1] < child1_span[0]
+        # Example tree: [(1, 1), (8, 2), (8, 3), (8, 5), (1, 8)]
+        # Example idx2semantic: {"1": E("cake"), "3": P("cook")}
 
-            # get E/P entity class of the children
-            child0_semantic = span2semantic[str(child0_span)]
-            child1_semantic = span2semantic[str(child1_span)]
-            # pdb.set_trace()
+        # Sort the head_dep_idx in a bottom-up manner (and remove root self-pair)
+        root_idx = [head for head, dep in head_dep_idx if head == dep][0]
+        head_dep_idx = self.sort_bottom_up(head_dep_idx)
 
-            # Use linear layers to select semantic operation
-            cat_distr, _, actions_i, parent_semantic = self.semantic_merge(child0_semantic, child1_semantic,
-                                                                           span2repre[str(parent_span)],
-                                                                           relaxed, tau_weights,
-                                                                           straight_through, noise_i,
-                                                                           eval_swr_actions_i)
-            # returns the distribution (for RL), the sampled action one-hot, and the symbolic meaning of the parent span
-            # assign selected operation to parent
-            span2semantic[str(parent_span)] = parent_semantic
+        for head, dep in head_dep_idx:
+            # get semantic class of the head and dependent
+            head_sem = idx2semantic[str(head)]
+            dep_sem = idx2semantic[str(dep)]
 
-            # collect for RL
+            head_contextual = idx2contextual[str(head)]
+
+            cat_distr, _, actions_i, parent_semantic = self.semantic_merge(head_sem, dep_sem, head_contextual) 
+
+            idx2semantic[str(head)] = parent_semantic
+
             if cat_distr is not None:
+                # collect for RL
                 semantic_normalized_entropy.append(cat_distr.normalized_entropy)
                 semantic_log_prob.append(-cat_distr.log_prob(actions_i))
-
-            # pdb.set_trace()
-
-        # pdb.set_trace()
 
         # calculate the normalized entropy and log probability of the actions taken for RL
         assert len(semantic_normalized_entropy) > 0, f"===== No semantic actions taken =====\n{pair}\n{semantic_normalized_entropy}\n{span2semantic}\n{parent_child_spans}"
@@ -447,17 +341,18 @@ class Solver(nn.Module):
 
         assert relaxed is False
 
-        # the final meaning is in the root (the last parent span)
-        final_semantic = copy.deepcopy(span2semantic[str(parent_span)]) 
+        # the final meaning is in the root (the last head idx)
+        assert head == root_idx, "Error in the tree structure, the root is not the last head idx"
+        final_semantic = copy.deepcopy(idx2semantic[str(head)]) 
 
-        ## if final semantic is an entity, we create a ghost predicate for it
-        # [ccomp_word/xcomp_word, agent_entity_class, theme_entity_class, recipient_entity_class, action_word]
+        # if final semantic is an entity, we create a ghost predicate for it
         if isinstance(final_semantic, E):
-            action = [None, None, final_semantic, None, 'ghost_predicate']
-            final_semantic = P('ghost_predicate')
-            final_semantic.action_chain = [action]
-
-
+            ghost_pred = P('ghost_predicate')
+            ghost_pred.children = final_semantic
+            final_semantic = copy.deepcopy(ghost_pred)
+        
+        # TODO: deal with this
+        '''
         # fix the representation of unnaccusative verbs (such as fall), where the subject is actually the theme
         for action_idx in range(len(final_semantic.action_chain)):
             action_info = final_semantic.action_chain[action_idx]
@@ -483,155 +378,134 @@ class Solver(nn.Module):
                     final_semantic.action_chain[action_idx][2] = agent_class
                     final_semantic.has_agent = False
                     final_semantic.has_theme = True
-
         # update the span2semantic with the fixed final semantic
-        span2semantic[str(parent_span)] = final_semantic
+        idx2semantic[str(parent_span)] = final_semantic
+        '''
+        debug_info = {"idx2semantic": idx2semantic,
+                      "head_dep_idx": head_dep_idx,
+                      "root_idx": root_idx,
+                      "last_head": head}
 
-        semantic_rl_infos = [normalized_entropy, semantic_log_prob, span2semantic, parent_span]
+        return final_semantic, normalized_entropy, semantic_log_prob, debug_info
 
-        return semantic_rl_infos
-
-    def init_semantic_class(self, span2output_token):
-        span2semantic = {}
-        for span in span2output_token:
-            span_position = span[0]
-            output_token = span[1]
+    def init_semantic_class(self, idx2output_token):
+        idx2semantic = {}
+        for idx in idx2output_token:
+            idx_position = idx[0]
+            output_token = idx[1]
 
             assert output_token in self.entity_list + self.predicate_list
 
             if output_token in self.entity_list:
-                span_semantic = E(output_token)
+                idx_semantic = E(output_token)
             else:
-                span_semantic = P(output_token)
+                idx_semantic = P(output_token)
 
-            span2semantic[str(span_position)] = span_semantic
+            idx2semantic[str(idx_position)] = idx_semantic
 
-        return span2semantic
+        return idx2semantic
 
-    def semantic_merge(self, child0_semantic, child1_semantic, parent_repre,
-                       relaxed, tau_weights, straight_through, gumbel_noise, ev_swr_actions):
+    def semantic_merge(self, head_sem, dep_sem, head_contextual):
         """ Compose the two children into a parent semantic class. 
         
         This is done by selecting a semantic operation from the semantic classifier.
         """
-        if isinstance(child0_semantic, E) and isinstance(child1_semantic, E):
-            semantic_score = self.semantic_E_E(parent_repre)
+        # E2E classifier
+        if isinstance(head_sem, E) and isinstance(dep_sem, E):
+            semantic_score = self.semantic_E_E(head_contextual)
             semantic_mask = torch.ones_like(semantic_score)
 
             cat_distr = Categorical(semantic_score, semantic_mask)
-            actions, gumbel_noise = self._sample_action(cat_distr, semantic_mask, relaxed, tau_weights,
-                                                        straight_through,
-                                                        gumbel_noise)
+            actions, gumbel_noise = self._sample_action(cat_distr, #
+                                                        semantic_mask, 
+                                                        self.relaxed, 
+                                                        self.tau_weights,
+                                                        self.straight_through,
+                                                        self.gumbel_noise)
+            # 0: in, 1: on, 2: beside
+            parent_semantic = copy.deepcopy(head_sem)
             if actions[0, 0] == 1:
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_E_in(child1_semantic)
+                parent_semantic.add_child(dep_sem, 'in')
             elif actions[0, 1] == 1:
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_E_on(child1_semantic)
+                parent_semantic.add_child(dep_sem, 'on')
             elif actions[0, 2] == 1:
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_E_beside(child1_semantic)
-            elif actions[0, 3] == 1:
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_E_recipient_theme(child1_semantic)
-            elif actions[0, 4] == 1:
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_E_theme_recipient(child1_semantic)
-            elif actions[0, 5] == 1:
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_E_theme_agent(child1_semantic)
+                parent_semantic.add_child(dep_sem, 'beside')
             else:
-                assert actions[0, 6] == 1
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_E_recipient_agent(child1_semantic)
+                raise ValueError(f"Invalid action by E2E classifier: {actions}")
 
-        elif isinstance(child0_semantic, P) and isinstance(child1_semantic, P):
-            semantic_score = self.semantic_P_P(parent_repre)
+        # P2P classifier
+        elif isinstance(head_sem, P) and isinstance(dep_sem, P):
+            semantic_score = self.semantic_P_P(head_contextual)
             semantic_mask = torch.ones_like(semantic_score)
 
             cat_distr = Categorical(semantic_score, semantic_mask)
-            actions, gumbel_noise = self._sample_action(cat_distr, semantic_mask, relaxed, tau_weights,
-                                                        straight_through,
-                                                        gumbel_noise)
-
+            actions, gumbel_noise = self._sample_action(cat_distr, #
+                                                        semantic_mask, 
+                                                        self.relaxed, 
+                                                        self.tau_weights,
+                                                        self.straight_through,
+                                                        self.gumbel_noise)
+            # 0: ccomp, 1: xcomp
+            parent_semantic = copy.deepcopy(head_sem)
             if actions[0, 0] == 1:
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_P_ccomp(child1_semantic)
-            else:
+                parent_semantic.add_child(dep_sem, 'ccomp')
+            elif actions[0, 1] == 1:
                 assert actions[0, 1] == 1
-                parent_semantic = copy.deepcopy(child0_semantic)
-                parent_semantic.add_P_xcomp(child1_semantic)
+                parent_semantic.add_child(dep_sem, 'xcomp')
+            else:
+                raise ValueError(f"Invalid action by P2P classifier: {actions}")
+
+        # P2E classifier
+        elif isinstance(head_sem, P) and isinstance(dep_sem, E):
+            semantic_score = self.semantic_P_E(head_contextual)
+            semantic_mask = torch.ones_like(semantic_score)
+
+            if not parent_semantic.is_full:
+                assert parent_semantic.has_agent is False or \
+                        parent_semantic.has_theme is False or \
+                        parent_semantic.has_recipient is False
+                if parent_semantic.has_agent is True:
+                    semantic_mask[0, 0] = 0
+                if parent_semantic.has_theme is True:
+                    semantic_mask[0, 1] = 0
+                if parent_semantic.has_recipient is True:
+                    semantic_mask[0, 2] = 0
+            else:
+                # TODO: what to do when the parent is full?
+                pass
+
+            cat_distr = Categorical(semantic_score, semantic_mask)
+            actions, gumbel_noise = self._sample_action(cat_distr, #
+                                                    semantic_mask, 
+                                                    self.relaxed, 
+                                                    self.tau_weights,
+                                                    self.straight_through,
+                                                    self.gumbel_noise)
+            # 0: agent, 1: theme, 2: recipient
+            parent_semantic = copy.deepcopy(head_sem)
+            if actions[0, 0] == 1:
+                parent_semantic.add_child(dep_sem, 'agent')
+            elif actions[0, 1] == 1:
+                parent_semantic.add_child(dep_sem, 'theme')
+            elif actions[0, 2] == 1:
+                assert actions[0, 2] == 1
+                parent_semantic.add_child(dep_sem, 'recipient')
+            else:
+                raise ValueError(f"Invalid action by P2E classifier: {actions}")
+            
+        # E2P classifier
+        elif isinstance(head_sem, E) and isinstance(dep_sem, P):
+            # No classifier for this case
+            # we know its a relcl
+            parent_semantic = copy.deepcopy(head_sem)
+            parent_semantic.add_child(dep_sem, 'relcl')
+            cat_distr, gumbel_noise, actions = None, None, None
 
         else:
-            semantic_score = self.semantic_P_E(parent_repre)
-            semantic_mask = torch.ones_like(semantic_score)
-
-            if isinstance(child0_semantic, P) and isinstance(child1_semantic, E):
-                parent_semantic = copy.deepcopy(child0_semantic)
-                E_semantic = copy.deepcopy(child1_semantic)
-            else:
-                assert isinstance(child1_semantic, P) and isinstance(child0_semantic, E)
-                parent_semantic = copy.deepcopy(child1_semantic)
-                E_semantic = copy.deepcopy(child0_semantic)
-
-            if E_semantic.entity_para is not None:
-                if E_semantic.entity_chain[0][1] == 'recipient' and \
-                        E_semantic.entity_para.entity_chain[0][1] == 'theme':
-                    parent_semantic.add_E_recipient_theme(E_semantic)
-                    parent_semantic.has_recipient = True
-                    parent_semantic.has_theme = True
-                elif E_semantic.entity_chain[0][1] == 'theme' and \
-                        E_semantic.entity_para.entity_chain[0][1] == 'recipient':
-                    parent_semantic.add_E_theme_recipient(E_semantic)
-                    parent_semantic.has_theme = True
-                    parent_semantic.has_recipient = True
-                elif E_semantic.entity_chain[0][1] == 'theme' and \
-                        E_semantic.entity_para.entity_chain[0][1] == 'agent':
-                    parent_semantic.add_E_theme_agent(E_semantic)
-                    parent_semantic.has_theme = True
-                    parent_semantic.has_agent = True
-                else:
-                    assert E_semantic.entity_chain[0][1] == 'recipient' and \
-                           E_semantic.entity_para.entity_chain[0][1] == 'agent'
-                    parent_semantic.add_E_recipient_agent(E_semantic)
-                    parent_semantic.has_recipient = True
-                    parent_semantic.has_agent = True
-
-                cat_distr, actions, gumbel_noise = None, None, None
-
-            else:
-                if not parent_semantic.is_full:
-                    assert parent_semantic.has_agent is False or \
-                           parent_semantic.has_theme is False or \
-                           parent_semantic.has_recipient is False
-                    if parent_semantic.has_agent is True:
-                        semantic_mask[0, 0] = 0
-                    if parent_semantic.has_theme is True:
-                        semantic_mask[0, 1] = 0
-                    if parent_semantic.has_recipient is True:
-                        semantic_mask[0, 2] = 0
-
-                cat_distr = Categorical(semantic_score, semantic_mask)
-                actions, gumbel_noise = self._sample_action(cat_distr, semantic_mask, relaxed, tau_weights,
-                                                            straight_through,
-                                                            gumbel_noise)
-                if actions[0, 0] == 1:
-                    parent_semantic.add_E_agent(E_semantic)
-                    parent_semantic.has_agent = True
-                elif actions[0, 1] == 1:
-                    parent_semantic.add_E_theme(E_semantic)
-                    parent_semantic.has_theme = True
-                else:
-                    assert actions[0, 2] == 1
-                    parent_semantic.add_E_recipient(E_semantic)
-                    parent_semantic.has_recipient = True
-
-            if parent_semantic.has_agent is True and \
-                    parent_semantic.has_theme is True and \
-                    parent_semantic.has_recipient is True:
-                parent_semantic.is_full = True
+            raise ValueError(f"Invalid semantic class: {head_sem}, {dep_sem}")
 
         return cat_distr, gumbel_noise, actions, parent_semantic
+
 
     def _sample_action(self, cat_distr, mask, relaxed, tau_weights, straight_through, gumbel_noise):
         if self.training:
@@ -669,12 +543,19 @@ class HRLModel(nn.Module):
         self.unac_predicate_list = unac_predicate_list
         self.abstractor = BottomAbstrator(alignments_idx)
         self.classifier = BottomClassifier(output_lang, alignments_idx)
-        self.composer = BottomUpTreeComposer(word_dim, hidden_dim, vocab_size, "no_transformation",
-                                             composer_trans_hidden, input_lang, output_lang,
-                                             alignments_idx=alignments_idx,
-                                             entity_list=entity_list,
-                                             caus_predicate_list=caus_predicate_list,
-                                             unac_predicate_list=unac_predicate_list)
+        self.composer = DepTreeComposer(
+            input_dim=word_dim,
+            hidden_dim=hidden_dim,
+            vocab_size=vocab_size,
+            input_lang=input_lang,
+            output_lang=output_lang,
+            alignments_idx=alignments_idx,
+            entity_list=entity_list,
+            caus_predicate_list=caus_predicate_list,
+            unac_predicate_list=unac_predicate_list,
+            dropout_prob=None,
+            context_type="bilstm",
+        )
         self.solver = Solver(hidden_dim, output_lang,
                              entity_list=entity_list,
                              caus_predicate_list=caus_predicate_list,
@@ -693,97 +574,49 @@ class HRLModel(nn.Module):
     def get_low_parameters(self):
         return list(chain(self.solver.parameters()))
 
-    def case_study(self, reduced_output, token_list):
-        token_list = token_list[0].split()
-        sentence_len = len(token_list)
-        sentences_num = len(reduced_output)
-        res = []
-        for i in range(sentences_num):
-            sentence = reduced_output[i]
-            dic = {}
-            min_num, max_num = sentence_len + 1, 0
-            for x in sentence:
-                parent = x[0]
-                children = x[1]
-                dic[tuple(parent)] = children
-                max_num = max(max_num, parent[1])
-                min_num = min(min_num, parent[0])
-
-            def dfs(parent):
-                if not parent in dic:
-                    return "(" + " ".join([token_list[i] for i in range(parent[0], parent[1] + 1)]) + ")"
-                children = dic[parent]
-                child0 = dfs(tuple(children[0]))
-                child1 = dfs(tuple(children[1]))
-
-                def fill_gap(begin, end):
-                    string = ""
-                    for i in range(begin, end):
-                        string += token_list[i] + " "
-                    return string[:-1]
-
-                case_string = "(" + fill_gap(parent[0], children[0][0]) + child0 \
-                              + fill_gap(children[0][1] + 1, children[1][0]) + child1 \
-                              + fill_gap(children[1][1] + 1, parent[1] + 1) + ")"
-                return case_string
-
-            res.append(dfs((min_num, max_num)))
-        return res
-
-    def forward(self, pair, x, sample_num, is_test=False, epoch=None, debug_info=None):
+    def forward(self, pair, x, sample_num, is_test=False, epoch=None):
         self.is_test = is_test
         batch_forward_info, pred_chain, label_chain, state = self._forward(
-            pair, x, sample_num, epoch, is_test, debug_info=debug_info)
+            pair, x, sample_num, epoch, is_test)
         return batch_forward_info, pred_chain, label_chain, state
 
-    def _forward(self, pair, x, sample_num, epoch, is_test, debug_info):
-        assert x.size(1) > 1
+    def _forward(self, pair, x, sample_num, epoch, is_test):
+        debug_info = {}
+
+        assert x.size(0) > 1
         # [A] [cake] [was] [cooked] [by] [the] [scientist]
 
         bottom_idx = self.abstractor(x)
         # [1, 3, 6]
         # Corresponding to: cake, cooked, scientist
 
-
         idx2output_token = self.classifier(x, bottom_idx)
         # [[1, "cake"], [3, "cook"], [6, "scientist"]]
 
-
         # repeat sample_num (10) times to explore different trees
-        bottom_idx_batch = [bottom_idx for _ in range(sample_num)]
-        idx2output_token_batch = [idx2output_token for _ in range(sample_num)]
-
+        #bottom_idx_batch = [bottom_idx for _ in range(sample_num)]
+        #idx2output_token_batch = [idx2output_token for _ in range(sample_num)]
 
         # tree_rl_info has one entry per sample of the batch
         # it contains the normalized entropy, log prob, parent-child pairs (the merges that were made) and idx2repre (embeddings of tokens)
         # span2variable_batch contains a mapping of the abstracted spans ([1, 1]) to the tokens (cake, cooked, scientist)
-        tree_rl_info, span2variable_batch = self.composer(pair, x, bottom_idx_batch, idx2output_token_batch)
-        tree_normalized_entropy, tree_log_prob, parent_child_spans_batch, span2repre_batch = tree_rl_info
-
+        head_dep_idx, idx2contextual, debug_info["composer"] = self.composer(x, bottom_idx)
 
         batch_forward_info = []
 
         # we iterate over samples of the batch, and apply semantic composition
         for in_batch_idx in range(sample_num):
-            # get the tree structure, embeddings representations, and mappings to content tokens for the sample
-            parent_child_spans = parent_child_spans_batch[in_batch_idx]
-            span2repre = span2repre_batch[in_batch_idx]
-            span2output_token = span2output_token_batch[in_batch_idx]
-
-            assert len(parent_child_spans) != 0, f"===== No semantic actions taken =====\n{pair}\n{parent_child_spans}\n{span2repre}\n{span2output_token}"
-
-            # and send them to the solver to resolve back to a surface form
             # the solvers walks the tree bottom up, applies semantic composition rules, and generates a logical form
-            semantic_rl_infos = self.solver(pair, span2output_token, parent_child_spans, span2repre)
-
-            # returns an entromy, a log prob, the meaning representations, and the root (end) span of the tree
-            semantic_normalized_entropy, semantic_log_prob, span2semantic, end_span = semantic_rl_infos
+            final_semantic, normalized_entropy, semantic_log_prob, debug_info = self.solver(pair, 
+                                                                                            head_dep_idx, 
+                                                                                            idx2contextual, 
+                                                                                            bottom_idx, 
+                                                                                            idx2output_token)
 
             # convert the resulting tree structure into a flat chain of tokens representing the logical form
             pred_chain = self.translate(span2semantic[str(end_span)])
             # pdb.set_trace()
             
-
             # conver the gold label into a flat chain of tokens representing the logical form
             label_chain = self.process_output_alt(pair[1])
 
@@ -795,7 +628,6 @@ class HRLModel(nn.Module):
             #Gold Label: * table ( x _ 6 ) ; cook . agent ( x _ 1 , ? ) and cook . theme ( x _ 1 , x _ 3 ) and cake ( x _ 3 ) and cake . nmod . beside ( x _ 3 , x _ 6 )
             #Parsed Gold Label ['cook', '?', 'cake', 'beside', 'table', 'None']
             #Predicted Label Chain ['cook', 'who', 'cake', 'beside', 'table', 'None']
-
 
             # and calculate the reward for the generated logical form by comparing to the gold
             reward = self.get_reward(pred_chain, label_chain)
@@ -819,8 +651,7 @@ class HRLModel(nn.Module):
                 print("Saved debug info")
                 print(pred_chain)
                 quit()
-            '''
-            
+            '''            
         # pdb.set_trace()
         state = {
             "bottom_span": bottom_span,
