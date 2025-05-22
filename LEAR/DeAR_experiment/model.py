@@ -31,16 +31,26 @@ x4_token = 6
 all_entities = ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]
 available_src_vars = ['x1', 'x2', 'x3', 'x4']
 
+class Node:
+    def __repr__(self,depth=0):
+        s = f"{'\t'*depth}{self.rel} {self.__class__.__name__}({self.token}) - {self.ix}"
+        for child in self.children:
+            s += f"\n{child.__repr__(depth=depth+1)}"
+        return s
 
-class E:  # Entities (M0~M9)
+    def __str__(self,depth=0):
+        return self.__repr__(depth=depth)
+
+class E(Node):  # Entities (M0~M9)
     # 0: in
     # 1: on
     # 2: beside
     # 3: relcl
-    def __init__(self, entity):
+    def __init__(self, entity, ix=-1):
         self.children = []
         self.token = entity
         self.rel = None
+        self.ix = ix
 
     def add_child(self, child, rel):
         assert rel in ['in', 'on', 'beside', 'relcl']
@@ -54,12 +64,14 @@ class E:  # Entities (M0~M9)
         self.children.append(child_aux)
 
 
-class P:
-    def __init__(self, action):
-        
+
+
+class P(Node):
+    def __init__(self, action, ix=-1):
         self.children = []
         self.token = action
         self.rel = None
+        self.ix = ix
 
         self.has_role = {"agent": False, "theme": False, "recipient": False}
 
@@ -197,9 +209,7 @@ class DepTreeComposer(nn.Module):
             log_prob: dummy tensor for API consistency
             head_dep_idx: list of (head, dependent) tuples
         """
-        print(x.shape)
         token_embeds = self.embd_parser(x)  # (S, input_dim)
-        print(token_embeds.shape)
 
         contextualized = self.encode_contextual(token_embeds)  # (S, hidden_dim)
         
@@ -235,7 +245,7 @@ class Solver(nn.Module):
     """
     # To compose bottom abstractions with rules
     def __init__(self, hidden_dim, output_lang, entity_list=[], caus_predicate_list=[], 
-                 unac_predicate_list=[], relaxed=False, tau_weights=None, straight_through=False, noise=None,
+                 unac_predicate_list=[], relaxed=False, tau_weights=None, straight_through=False, gumbel_noise=None,
                 eval_actions=None, eval_sr_actions=None, eval_swr_actions=None, debug_info=None):
         super().__init__()
 
@@ -265,7 +275,7 @@ class Solver(nn.Module):
         self.relaxed = relaxed
         self.tau_weights = tau_weights
         self.straight_through = straight_through
-        self.noise = noise
+        self.gumbel_noise = gumbel_noise
         self.eval_actions = eval_actions
         self.eval_sr_actions = eval_sr_actions
         self.eval_swr_actions = eval_swr_actions
@@ -289,27 +299,15 @@ class Solver(nn.Module):
         pairs_no_root = [pair for pair in pairs if pair[0] != pair[1]]  # exclude root self-pair
         return sorted(pairs_no_root, key=lambda pair: get_depth(pair[1]), reverse=True)
 
-    def forward(self, pair, head_dep_idx, idx2contextual, bottom_idx, idx2output_token):
+    def forward(self, pair, head_dep_idx, idx2contextual, idx2output_token):
         # returns either E or P instances depending of whether the token is on the entity or predicate list
         # idx2output_token is a list of pairs like [ 1, "cake"], [3, "cook"]]
         # idx2semantic is a dictionary of pairs like {"1": E("cake"), "3": P("cook")}
         idx2semantic = self.init_semantic_class(idx2output_token)
         # pdb.set_trace()
 
-        # debug prints
-        print(f"===== Input Sentence =====\n{pair[0]}")
-        print(f"===== Input Tree =====\n{head_dep_idx}")
-        print(f"===== Nodes =====\n{bottom_idx}")
-        print(f"===== Semantic =====\n{idx2semantic}")
-        print(f"===== Alignment =====\n{idx2output_token}")
-        quit()
-        # end debug
-
         semantic_normalized_entropy = []
         semantic_log_prob = []
-
-        noise_i = None
-        eval_swr_actions_i = None
 
         # Example tree: [(1, 1), (8, 2), (8, 3), (8, 5), (1, 8)]
         # Example idx2semantic: {"1": E("cake"), "3": P("cook")}
@@ -335,11 +333,9 @@ class Solver(nn.Module):
                 semantic_log_prob.append(-cat_distr.log_prob(actions_i))
 
         # calculate the normalized entropy and log probability of the actions taken for RL
-        assert len(semantic_normalized_entropy) > 0, f"===== No semantic actions taken =====\n{pair}\n{semantic_normalized_entropy}\n{span2semantic}\n{parent_child_spans}"
+        assert len(semantic_normalized_entropy) > 0, f"===== No semantic actions taken =====\n{pair}\n{semantic_normalized_entropy}\n{idx2semantic}"
         normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
         semantic_log_prob = sum(semantic_log_prob)
-
-        assert relaxed is False
 
         # the final meaning is in the root (the last head idx)
         assert head == root_idx, "Error in the tree structure, the root is not the last head idx"
@@ -348,7 +344,7 @@ class Solver(nn.Module):
         # if final semantic is an entity, we create a ghost predicate for it
         if isinstance(final_semantic, E):
             ghost_pred = P('ghost_predicate')
-            ghost_pred.children = final_semantic
+            ghost_pred.children = [final_semantic]
             final_semantic = copy.deepcopy(ghost_pred)
         
         # TODO: deal with this
@@ -397,9 +393,9 @@ class Solver(nn.Module):
             assert output_token in self.entity_list + self.predicate_list
 
             if output_token in self.entity_list:
-                idx_semantic = E(output_token)
+                idx_semantic = E(output_token, idx_position)
             else:
-                idx_semantic = P(output_token)
+                idx_semantic = P(output_token, idx_position)
 
             idx2semantic[str(idx_position)] = idx_semantic
 
@@ -424,11 +420,11 @@ class Solver(nn.Module):
                                                         self.gumbel_noise)
             # 0: in, 1: on, 2: beside
             parent_semantic = copy.deepcopy(head_sem)
-            if actions[0, 0] == 1:
+            if actions[0] == 1:
                 parent_semantic.add_child(dep_sem, 'in')
-            elif actions[0, 1] == 1:
+            elif actions[1] == 1:
                 parent_semantic.add_child(dep_sem, 'on')
-            elif actions[0, 2] == 1:
+            elif actions[2] == 1:
                 parent_semantic.add_child(dep_sem, 'beside')
             else:
                 raise ValueError(f"Invalid action by E2E classifier: {actions}")
@@ -447,10 +443,10 @@ class Solver(nn.Module):
                                                         self.gumbel_noise)
             # 0: ccomp, 1: xcomp
             parent_semantic = copy.deepcopy(head_sem)
-            if actions[0, 0] == 1:
+            if actions[0] == 1:
                 parent_semantic.add_child(dep_sem, 'ccomp')
-            elif actions[0, 1] == 1:
-                assert actions[0, 1] == 1
+            elif actions[1] == 1:
+                assert actions[1] == 1
                 parent_semantic.add_child(dep_sem, 'xcomp')
             else:
                 raise ValueError(f"Invalid action by P2P classifier: {actions}")
@@ -465,11 +461,11 @@ class Solver(nn.Module):
                         parent_semantic.has_theme is False or \
                         parent_semantic.has_recipient is False
                 if parent_semantic.has_agent is True:
-                    semantic_mask[0, 0] = 0
+                    semantic_mask[0] = 0
                 if parent_semantic.has_theme is True:
-                    semantic_mask[0, 1] = 0
+                    semantic_mask[1] = 0
                 if parent_semantic.has_recipient is True:
-                    semantic_mask[0, 2] = 0
+                    semantic_mask[2] = 0
             else:
                 # TODO: what to do when the parent is full?
                 pass
@@ -483,12 +479,12 @@ class Solver(nn.Module):
                                                     self.gumbel_noise)
             # 0: agent, 1: theme, 2: recipient
             parent_semantic = copy.deepcopy(head_sem)
-            if actions[0, 0] == 1:
+            if actions[0] == 1:
                 parent_semantic.add_child(dep_sem, 'agent')
-            elif actions[0, 1] == 1:
+            elif actions[1] == 1:
                 parent_semantic.add_child(dep_sem, 'theme')
-            elif actions[0, 2] == 1:
-                assert actions[0, 2] == 1
+            elif actions[2] == 1:
+                assert actions[2] == 1
                 parent_semantic.add_child(dep_sem, 'recipient')
             else:
                 raise ValueError(f"Invalid action by P2E classifier: {actions}")
@@ -607,18 +603,29 @@ class HRLModel(nn.Module):
         # we iterate over samples of the batch, and apply semantic composition
         for in_batch_idx in range(sample_num):
             # the solvers walks the tree bottom up, applies semantic composition rules, and generates a logical form
-            final_semantic, normalized_entropy, semantic_log_prob, debug_info = self.solver(pair, 
-                                                                                            head_dep_idx, 
-                                                                                            idx2contextual, 
-                                                                                            bottom_idx, 
-                                                                                            idx2output_token)
+            final_semantic, normalized_entropy, semantic_log_prob, sem_debug_info = self.solver(pair, 
+                                                                                                head_dep_idx, 
+                                                                                                idx2contextual, 
+                                                                                                idx2output_token)
+
+            # debug prints
+            print(f"===== Input Sentence =====\n{pair[0]}")
+            print(f"===== Gold Label =====\n{pair[1]}")
+            print(f"===== Input Tree =====\n{head_dep_idx}")
+            print(f"===== Nodes =====\n{bottom_idx}")
+            print(f"===== Alignment =====\n{idx2output_token}")
+            print(f"===== Final Semantic =====\n{final_semantic}")
+            # end debug
+
+            # conver the gold label into a flat chain of tokens representing the logical form
+            label_chain, gold_debug_info = self.process_output(pair[1])
+            print(f"===== Gold Label Chain =====\n{label_chain}")
+            quit()
 
             # convert the resulting tree structure into a flat chain of tokens representing the logical form
             pred_chain = self.translate(span2semantic[str(end_span)])
             # pdb.set_trace()
             
-            # conver the gold label into a flat chain of tokens representing the logical form
-            label_chain = self.process_output_alt(pair[1])
 
             #if "who" in pair[1] or "what" in pair[1]:
             #    print("")
@@ -778,271 +785,79 @@ class HRLModel(nn.Module):
 
         return flat_chain
 
-    def process_output_alt(self, s):
-        def extract_vars(raw):
-            vars = {}    
-            predicates = []
-            nmods = {}
-            rels = []
-            
-            elements = raw.replace(" and ", ";").split(";")
-            for element in elements:
-                # if there is an nmod, it is a noun modifier
-                if ". nmod ." in element:
-                    # cake.nmod.on.x_4.x_7
-                    nmod = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
-                    nmod = nmod.split(".")
-                    nmod_args = nmod[-3:]
-                    nmods[nmod[-2]] = nmod_args
+    def process_output(self, s):
+        # Examples:
+        # * cake ( x _ 8 ) ; cat ( x _ 1 ) AND cat . nmod ( x _ 1 , x _ 3 ) AND admire . agent ( x _ 3 , x _ 1 ) AND admire . ccomp ( x _ 3 , x _ 6 ) AND eat . agent ( x _ 6 , Emily ) AND eat . theme ( x _ 6 , x _ 8 )
+        # * muffin ( x _ 4 ) ; * painting ( x _ 7 ) ; * girl ( x _ 10 ) ; mail . recipient ( x _ 2 , Emma ) AND mail . theme ( x _ 2 , x _ 4 ) AND mail . agent ( x _ 2 , x _ 10 ) AND muffin . nmod . beside ( x _ 4 , x _ 7 )
 
-                elif ". nmod" in element:
-                    # cake.nmod.x_4.x_7
-                    rel = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
-                    rel = rel.split(".")
-                    rel_pred = rel[-1]
-                    rels.append(rel_pred)
-
-                # if there is a comma, it is a predicate
-                elif ',' in element:
-                    # study . agent ( x _ 2 , x _ 1 )
-                    predicate = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
-                    predicate_args = predicate.split(".")
-                    predicates.append(predicate_args)
-                # if there is no comma, it is a variable
-                else:
-                    element = element.replace(" ", "").replace("(",".").replace(")","")
-                    element = element.split(".")
-                    vars[element[1]] = element[0]
-
-            for pred in predicates:
-                vars[pred[2]] = pred[0]
-
-            return {"vars": vars, "predicates": predicates, "nmods": nmods, "rels": rels, "raw": raw}
-
-        def compose(sentence_info):
-            vars = sentence_info["vars"]
-            predicates = sentence_info["predicates"]
-            nmods = sentence_info["nmods"]
-            rels = sentence_info["rels"]
-
-            # we create a dictionary of predicates, where the key is the predicate name and the value is a list of its arguments
-            predicate_dict = {}
-            for pred in predicates:
-                # study . agent ( x _ 2 , x _ 1 )
-                # we disambiguate the predicate name by appending the number of the variable
-                pred_name = pred[0] + pred[2].split("_")[1]
-                if pred_name not in predicate_dict:
-                    predicate_dict[pred_name] = []
-                predicate_dict[pred_name].append(pred[1:])
-            # {'study': [['agent', 'x_2', 'x_1']]}
-
-            result = []
-            # to find if there is not a root predicate
-            # we check whether there is a predicate_id that is not in a rel
-            is_root_predicate = any([any([args[1] not in rels for args in predicate_dict[pred_name]]) for pred_name in predicate_dict.keys()])
-
-            if not is_root_predicate:
-                # if there is no predicate, we insert a ghost predicate
-                # its theme is the first variable that does not belong to an nmod or predicate
-                for var in vars.keys():
-                    if var not in [nmods[n_key][-1] for n_key in nmods.keys()] and var not in [predicate_dict[p_key][0][1] for p_key in predicate_dict.keys()]:
-                        ghost_theme = var
-                        break
-                predicate_dict["x"] = [["theme", "x", ghost_theme]]
-                vars["x"] = "ghost_predicate"
-            
-            sentence_info['predicate_dict'] = predicate_dict
-
-            for pred_name, args in predicate_dict.items():
-                # pred, agent, theme, recipient, ccomp, pred2...
-                agent, theme, recipient, comp = "None", "None", "None", "None"
-                for arg in args:
-                    if arg[0] == "agent":
-                        agent = arg[2]
-                    elif arg[0] == "theme":
-                        theme = arg[2]
-                    elif arg[0] == "recipient":
-                        recipient = arg[2]
-                    elif arg[0] in ["ccomp", "xcomp"]:
-                        comp = arg[0]
-                flat_chain = [arg[1], agent, theme, recipient]
-                if comp != "None":
-                    flat_chain.append(comp)
-                result.extend(flat_chain)
-
-            sentence_info['var_result'] = result
-
-            # place rels
-            for rel in rels:
-                try:
-                    ix = result.index(rel)
-                except ValueError:  
-                    print(sentence_info)
-                    raise ValueError(f"Key {rel} not found in result: {result}")
-                result.insert(ix, 'nmod')
-
-            # place nmods
-            for key in nmods.keys():
-                try:
-                    ix = result.index(key)
-                except ValueError:
-                    print(sentence_info)
-                    raise ValueError(f"Key {key} not found in result: {result}")
-                result.insert(ix + 1, nmods[key][0])
-                result.insert(ix + 2, nmods[key][-1])
-
-            # replace vars
-            for i in range(len(result)):
-                if result[i] in vars.keys():
-                    result[i] = vars[result[i]]
-
-                if result[i] != "None":
-                    result[i] = result[i].lower().replace("*", "")
-            return result
+        # each edge will be a triplet of form (hed, dep, rel_name)
+        # a predicate -> entity relation will look like (8, 1, "agent") (agent, theme, recipient)
+        # a predicate -> predicate relation will look like (8, 6, "ccomp") (ccomp, xcomp)
+        # an entity -> predicate relation will look like (1, 3, "relcl")
+        # an entity -> entity relation will look like (1, 3, "in") (in, on, beside)
+        edges = []
+        variable_map = {}
         
-        sentence_info = extract_vars(s)
-        result = compose(sentence_info)
-        return result
+        elements = s.replace(" and ", ";").split(";")
+        for element in elements:
+            # if there is an nmod, it can either be an nmod (if there is a preposition) or a relcl (if there is no preposition)
+            # check for nmod first
+            if ". nmod ." in element:
+                # cake.nmod.on.x_4.x_7
+                nmod = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
+                nmod = nmod.split(".")
+                variable_map[nmod[3]] = nmod[0]
+                nmod = nmod[-3:]
+                # [on, x_4, x_7]
+                nmod = [nmod[1], nmod[2], nmod[0]]
+                nmod = [el.replace("x_", "") for el in nmod]
+                # [4, 7, on]
+                edges.append(nmod)
 
+            # next, relcl
+            elif ". nmod" in element:
+                # cake.nmod.x_4.x_7
+                relcl = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
+                relcl = relcl.split(".")
+                variable_map[relcl[2]] = relcl[0]
+                relcl = relcl[-2:]
+                # [x_4, x_7]
+                relcl = [el.replace("x_", "") for el in relcl] + ["relcl"]
+                # [4, 7, relcl]
+                edges.append(relcl)
 
-    def process_output(self, output):
-        """ Process the flat list of tokens into a string representation of the logical form.
-        """
-        output_process = output.replace(" and ", " AND ")
-        output_process = output_process.replace(" ccomp ", " CCOMP ")
-        output_process = output_process.replace(" xcomp ", " XCOMP ")
-        output_process = output_process.replace(" nmod ", " NMOD ")
-        output_process = output_process.replace(" agent ", " AGENT ")
-        output_process = output_process.replace(" theme ", " THEME ")
-        output_process = output_process.replace(" recipient ", " RECIPIENT ")
-        output_process = output_process.replace(" x ", " X ")
-        output_process = output_process.replace(" ", "")
-        output_process = output_process.replace("*", "")
-        output_process = re.split(";|AND", output_process)
-
-        object_stack = {}
-        output_process_no_obj = copy.deepcopy(output_process)
-        for function in output_process:
-            if '.' not in function:  # entity
-                function_para = re.split(r"\(|\)", function)[:-1]
-                assert len(function_para) == 2
-                object, object_index = function_para
-                assert object_index not in object_stack
-                object_stack[object_index] = object
-                output_process_no_obj.remove(function)
+            # else, if there is a comma, it is a predicate
+            elif ',' in element:
+                # study . agent ( x _ 2 , x _ 1 )
+                predicate = element.replace(" ", "").replace("(",".").replace(")","").replace(",",".")
+                # study.agent.x_2.x_1
+                predicate = predicate.split(".")
+                variable_map[predicate[2]] = predicate[0]
+                predicate = predicate[-3:]
+                # [agent, x_2, x_1]
+                predicate = [predicate[1], predicate[2], predicate[0]]
+                # [x_2, x_1, agent]
+                predicate = [el.replace("x_", "") for el in predicate]
+                # [2, 1, agent]
+                edges.append(predicate)
+                
+            # if there is no comma, it is an entity, which we capture in variable_map
             else:
-                continue
+                # cake ( x _ 8 ) or * cake ( x _ 8 )
+                element = element.replace(" ", "").replace("(",".").replace(")","").replace("*", "")
+                # cake.x_8
+                element = element.split(".")
+                variable_map[element[1]] = element[0]
 
-        output_process_no_obj_no_pr = copy.deepcopy(output_process_no_obj)
-        output_process_no_obj.reverse()
-        for function in output_process_no_obj:
-            if 'NMOD' in function:  # pr
-                function_para = re.split(r"\(|\)|\.|,", function)[:-1]
-                assert len(function_para) == 5, f"function_para: {function_para}, {output}"
-                pr_word = function_para[2]
-                pr_subject_index = function_para[3]
-                pr_subject = object_stack[pr_subject_index]
-                # assert for 2 things:
-                # first, re-ensure subject
-                # second, ensure subject in object_stack has no other pr
-                # the second means that the composition process is from right to left
-                # (implemented by output_process_no_obj.reverse())
-                # this is to ensure the left subject has all corresponding objects
-                assert pr_subject == function_para[0]
-                pr_object_index = function_para[4]
-                # ensure pr_object_index is an index but not like Emma
-                assert 'X' in pr_object_index
-                # this can also ensure the left subject has all corresponding objects
-                # (as the object is popped, it cannot occur as subject again)
-                pr_object = object_stack.pop(pr_object_index)
-                new_subject = pr_subject + " " + pr_word + " " + pr_object
-                object_stack[pr_subject_index] = new_subject
-                output_process_no_obj_no_pr.remove(function)
-            else:
-                continue
+        # Now we go through the edges and replace the entities with their corresponding variables
+        for i in range(len(edges)):
+            for j in range(2):
+                if edges[i][j].isnumeric():
+                    assert "x_" + edges[i][j] in variable_map, f"Entity {edges[i][j]} not found in variable_map: {variable_map}"
+                    edges[i][j] = variable_map["x_" + edges[i][j]]
 
-        output_process_only_comp = copy.deepcopy(output_process_no_obj_no_pr)
-        predicate_stack = {}
-        predicate_object_stack = {}
-        for function in output_process_no_obj_no_pr:
-            if 'COMP' not in function:
-                function_para = re.split(r"\(|\)|\.|,", function)[:-1]
-                assert len(function_para) == 4
-                predicate, object_type, predicate_index, object_index = function_para
-                if 'X' not in object_index:
-                    object = object_index
-                else:
-                    object = object_stack[object_index]
-                if predicate_index not in predicate_stack:
-                    predicate_stack[predicate_index] = predicate
-                    predicate_object_stack[predicate_index] = {"AGENT": "None",
-                                                               "THEME": "None",
-                                                               "RECIPIENT": "None",
-                                                               }
-                predicate_object_stack[predicate_index][object_type] = object
-                output_process_only_comp.remove(function)
-            else:
-                continue
-
-        for predicate_key in predicate_object_stack:
-            if predicate_object_stack[predicate_key]["RECIPIENT"] != "None" \
-                    and predicate_object_stack[predicate_key]["THEME"] == "None":
-                pdb.set_trace()
-
-        final_chain = []
-        if output_process_only_comp:
-            output_process_only_comp.reverse()
-            for function in output_process_only_comp:
-                function_para = re.split(r"\(|\)|\.|,", function)[:-1]
-                assert len(function_para) == 4
-                compose_type = function_para[1]
-                assert compose_type in ["CCOMP", "XCOMP"]
-                subject_index = function_para[2]
-                object_index = function_para[3]
-                subject = predicate_stack[subject_index]
-                subject_contain = predicate_object_stack[subject_index]
-                try:
-                    assert subject == function_para[0]
-                except:
-                    pdb.set_trace()
-                # ensure object will not occur as subject
-                object = predicate_stack.pop(object_index)
-                object_contain = predicate_object_stack.pop(object_index)
-                if compose_type == 'XCOMP':
-                    assert subject_contain["AGENT"] == object_contain["AGENT"]
-                if final_chain == []:
-                    final_chain = [[subject, subject_contain], compose_type, [object, object_contain]]
-                else:
-                    final_chain = [[subject, subject_contain], compose_type] + final_chain
-
-        else:
-            assert len(predicate_stack) == 1
-            for predicate_index in predicate_stack:
-                subject = predicate_stack[predicate_index]
-                subject_contain = predicate_object_stack[predicate_index]
-                final_chain = [[subject, subject_contain]]
-
-        flat_chain = []
-
-        for pred_info in final_chain:
-            if isinstance(pred_info, list):
-                action = pred_info[0]
-                flat_chain.append(action)
-
-                action_info = pred_info[1]
-                agent = action_info['AGENT']
-                agent = agent.split()
-                flat_chain = flat_chain + agent
-
-                theme = action_info['THEME']
-                theme = theme.split()
-                flat_chain = flat_chain + theme
-
-                recipient = action_info['RECIPIENT']
-                recipient = recipient.split()
-                flat_chain = flat_chain + recipient
-
-            else:
-                assert pred_info in ["CCOMP", "XCOMP"]
-                flat_chain.append(pred_info.lower())
-        return flat_chain
+        debug_info = {
+            "elements": elements,
+            "variable_map": variable_map
+        }
+        return edges, debug_info
