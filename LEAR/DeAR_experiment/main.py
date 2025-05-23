@@ -264,7 +264,7 @@ def test(test_data, model, example2type, device, log_file=None):
             # test_data_example[0] = 'a girl on the table helped emma'
             # pdb.set_trace()
             try:
-                tokens_list = [indexes_from_sentence(input_lang, test_data_example[0], 'input')]
+                tokens_list = indexes_from_sentence(input_lang, test_data_example[0], 'input')
             except:
                 continue
             tokens = Variable(torch.LongTensor(tokens_list))
@@ -337,7 +337,7 @@ def validate(valid_data, model, epoch, device, logger):
         for idx, valid_data_example in enumerate(valid_data):
             # print(idx)
             try:
-                tokens_list = [indexes_from_sentence(input_lang, valid_data_example[0], 'input')]
+                tokens_list = indexes_from_sentence(input_lang, valid_data_example[0], 'input')
             except:
                 skip_count += 1
                 continue
@@ -388,7 +388,7 @@ def validate(valid_data, model, epoch, device, logger):
     # visualizer.log_performance(accuracy_meter.avg)
     # visualizer.update_epoch()
 
-    logger.info(f"Valid: epoch: {epoch} ce_loss: {ce_loss_meter.avg:.4f} accuracy: {accuracy_meter.avg:.4f} "
+    logger.info(f"Valid: epoch: {epoch+1} ce_loss: {ce_loss_meter.avg:.4f} accuracy: {accuracy_meter.avg:.4f} "
                 f"n_entropy: {n_entropy_meter.avg:.4f} "
                 f"loading_time: {loading_time_meter.avg:.4f} batch_time: {batch_time_meter.avg:.4f} "
                 f"skip_count: {skip_count} "
@@ -472,7 +472,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
 
                 rewards_all.append(reward)
                 accuracy_samples.append(accuracy)
-
+        
         normalized_entropy_samples = torch.cat(normalized_entropy_samples, dim=0)
         accuracy_samples = torch.tensor(accuracy_samples)
         rewards_all = torch.tensor(rewards_all)
@@ -522,9 +522,9 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         else:
             val_num = 3000
 
-        print(f"Train: epoch: {epoch} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
+        print(f"Train: epoch: {epoch + 1} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
         if (batch_idx + 1) % (val_num) == 0:
-            logger.info(f"Train: epoch: {epoch} batch_idx: {batch_idx + 1} ce_loss: {ce_loss_meter.avg:.4f} "
+            logger.info(f"Train: epoch: {epoch + 1} batch_idx: {batch_idx + 1} ce_loss: {ce_loss_meter.avg:.4f} "
                         f"reward_std: {reward_std_meter.avg:.4f} "
                         f"n_entropy: {n_entropy_meter.avg:.4f} loading_time: {loading_time_meter.avg:.4f} "
                         f"batch_time: {batch_time_meter.avg:.4f}")
@@ -539,9 +539,9 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
             val_accuracy = validate(valid_data, model, epoch, device, logger)
 
             global best_model_path
-            logger.info("saving model...")
-            best_model_path = f"{args.model_dir}/{epoch}-{batch_idx}.mdl"
-            torch.save({"epoch": epoch, "batch_idx": batch_idx, "state_dict": model.state_dict()}, best_model_path)
+            #logger.info("saving model...")
+            #best_model_path = f"{args.model_dir}/{epoch}-{batch_idx}.mdl"
+            #torch.save({"epoch": epoch, "batch_idx": batch_idx, "state_dict": model.state_dict()}, best_model_path)
             model.train()
 
         start = time.time()
@@ -683,7 +683,7 @@ def train_model(args, task_name, logger):
         logger.info(f"Epoch {epoch + 1} Gen accuracy: {final_gen_acc:.4f}")
 
         logger.info("Saving model...")
-        best_model_path = f"{args.model_dir}/epoch-{epoch}.mdl"
+        best_model_path = f"{args.model_dir}/epoch-{epoch+1}.mdl"
         torch.save({"epoch": epoch, "batch_idx": "final", "state_dict": model.state_dict()}, best_model_path)
 
         if val_accuracy == 1.:

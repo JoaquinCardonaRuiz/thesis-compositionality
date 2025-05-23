@@ -1,25 +1,23 @@
-import numpy as np
-def mst_decode(arc_scores, root_index=0):
-        """
-        Simple MST decoding for dependency arcs.
+import networkx as nx
 
-        Args:
-            arc_scores: Tensor (seq_len, seq_len), score[i][j] = i → j
-            root_index: Index of artificial ROOT token (default 0)
+def mst_decode(arc_scores):
+    """
+    Chu-Liu/Edmonds MST decoding using networkx.
+    """
+    L = arc_scores.size(0)
+    scores = arc_scores.detach().cpu().numpy()
 
-        Returns:
-            heads: list[int] of length seq_len, where heads[j] = i means i → j
-        """
+    g = nx.DiGraph()
+    for i in range(L):
+        for j in range(L):
+            if i == j:
+                continue  # still skip self-loops
+            g.add_edge(i, j, weight=scores[i][j])
 
-        L = arc_scores.size(0)
-        scores = arc_scores.detach().cpu().numpy()
+    mst = nx.maximum_spanning_arborescence(g, preserve_attrs=True)
 
-        heads = np.full(L, -1)
-        heads[root_index] = root_index  # root self-loop
+    heads = [-1] * L
+    for u, v in mst.edges:
+        heads[v] = u
 
-        for dep in range(L):
-            if dep == root_index:
-                continue
-            heads[dep] = np.argmax(scores[:, dep])
-
-        return list(heads)
+    return heads

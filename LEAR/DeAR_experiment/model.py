@@ -1,20 +1,11 @@
-import pdb
-import random
-import statistics
 from itertools import chain
 
-import math
-import torch.nn.functional as F
 from torch import nn
 from masked_cross_entropy import *
 from utils import Categorical
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from utils import clamp_grad
-import time
 import copy
-import re
-import pdb
-import os
 
 from modules.MSTDecoder import mst_decode
 
@@ -49,7 +40,7 @@ class E(Node):  # Entities (M0~M9)
     def __init__(self, entity, ix=-1):
         self.children = []
         self.token = entity
-        self.rel = None
+        self.rel = ''
         self.ix = ix
 
     def add_child(self, child, rel):
@@ -70,7 +61,7 @@ class P(Node):
     def __init__(self, action, ix=-1):
         self.children = []
         self.token = action
-        self.rel = None
+        self.rel = ''
         self.ix = ix
 
         self.has_role = {"agent": False, "theme": False, "recipient": False}
@@ -224,7 +215,8 @@ class DepTreeComposer(nn.Module):
         head_dep_idx = [(heads[i], i) for i in range(len(heads))]
 
         # map to original indices
-        head_dep_idx = [(bottom_idx[head], bottom_idx[dep]) for head, dep in head_dep_idx]
+        # we expect the root to be a self-loop
+        head_dep_idx = [(bottom_idx[head], bottom_idx[dep]) if head != -1 else (bottom_idx[dep], bottom_idx[dep]) for head, dep in head_dep_idx]
 
         idx2contextual = {str(bottom_idx[i]): bottom_contextualized[i] for i in range(bottom_contextualized.size(0))}
         
@@ -300,11 +292,16 @@ class Solver(nn.Module):
         return sorted(pairs_no_root, key=lambda pair: get_depth(pair[1]), reverse=True)
 
     def forward(self, pair, head_dep_idx, idx2contextual, idx2output_token):
+        debug_info = {}
+
         # returns either E or P instances depending of whether the token is on the entity or predicate list
         # idx2output_token is a list of pairs like [ 1, "cake"], [3, "cook"]]
         # idx2semantic is a dictionary of pairs like {"1": E("cake"), "3": P("cook")}
         idx2semantic = self.init_semantic_class(idx2output_token)
-        # pdb.set_trace()
+
+        debug_info["idx2semantic"] = idx2semantic
+        debug_info["head_dep_idx"] = head_dep_idx
+        debug_info["idx2output_token"] = idx2output_token
 
         semantic_normalized_entropy = []
         semantic_log_prob = []
@@ -314,7 +311,10 @@ class Solver(nn.Module):
 
         # Sort the head_dep_idx in a bottom-up manner (and remove root self-pair)
         root_idx = [head for head, dep in head_dep_idx if head == dep][0]
+        debug_info["root_idx"] = root_idx
+
         head_dep_idx = self.sort_bottom_up(head_dep_idx)
+        debug_info["sorted_head_dep_idx"] = head_dep_idx
 
         for head, dep in head_dep_idx:
             # get semantic class of the head and dependent
@@ -332,21 +332,30 @@ class Solver(nn.Module):
                 semantic_normalized_entropy.append(cat_distr.normalized_entropy)
                 semantic_log_prob.append(-cat_distr.log_prob(actions_i))
 
+        debug_info["idx2semantic"] = idx2semantic
+        debug_info["last_head"] = head
+        debug_info["last_dep"] = dep
+
         # calculate the normalized entropy and log probability of the actions taken for RL
-        assert len(semantic_normalized_entropy) > 0, f"===== No semantic actions taken =====\n{pair}\n{semantic_normalized_entropy}\n{idx2semantic}"
-        normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
-        semantic_log_prob = sum(semantic_log_prob)
-
+        if len(semantic_normalized_entropy) == 0:
+            # No stochastic decision was made in this sample
+            normalized_entropy = torch.tensor(0.0, requires_grad=True)
+            semantic_log_prob = torch.tensor(0.0, requires_grad=True)
+        else:
+            normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
+            semantic_log_prob = sum(semantic_log_prob)
+                
         # the final meaning is in the root (the last head idx)
-        assert head == root_idx, "Error in the tree structure, the root is not the last head idx"
+        assert head == root_idx, f"Error in the tree structure, the root is not the last head idx.\n\n\n {debug_info}"
         final_semantic = copy.deepcopy(idx2semantic[str(head)]) 
-
+        
+        '''
         # if final semantic is an entity, we create a ghost predicate for it
         if isinstance(final_semantic, E):
             ghost_pred = P('ghost_predicate')
             ghost_pred.children = [final_semantic]
             final_semantic = copy.deepcopy(ghost_pred)
-        
+        '''
         # TODO: deal with this
         '''
         # fix the representation of unnaccusative verbs (such as fall), where the subject is actually the theme
@@ -377,12 +386,13 @@ class Solver(nn.Module):
         # update the span2semantic with the fixed final semantic
         idx2semantic[str(parent_span)] = final_semantic
         '''
-        debug_info = {"idx2semantic": idx2semantic,
-                      "head_dep_idx": head_dep_idx,
-                      "root_idx": root_idx,
-                      "last_head": head}
+        rl_info = {
+            "normalized_entropy": normalized_entropy.unsqueeze(0),
+            "semantic_log_prob": semantic_log_prob.unsqueeze(0),
+        }
+                      
 
-        return final_semantic, normalized_entropy, semantic_log_prob, debug_info
+        return final_semantic, rl_info, debug_info
 
     def init_semantic_class(self, idx2output_token):
         idx2semantic = {}
@@ -456,15 +466,15 @@ class Solver(nn.Module):
             semantic_score = self.semantic_P_E(head_contextual)
             semantic_mask = torch.ones_like(semantic_score)
 
-            if not parent_semantic.is_full:
-                assert parent_semantic.has_agent is False or \
-                        parent_semantic.has_theme is False or \
-                        parent_semantic.has_recipient is False
-                if parent_semantic.has_agent is True:
+            if not head_sem.is_full:
+                assert head_sem.has_role['agent'] is False or \
+                        head_sem.has_role['theme'] is False or \
+                        head_sem.has_role['recipient'] is False
+                if head_sem.has_role['agent'] is True:
                     semantic_mask[0] = 0
-                if parent_semantic.has_theme is True:
+                if head_sem.has_role['theme'] is True:
                     semantic_mask[1] = 0
-                if parent_semantic.has_recipient is True:
+                if head_sem.has_role['recipient'] is True:
                     semantic_mask[2] = 0
             else:
                 # TODO: what to do when the parent is full?
@@ -578,10 +588,9 @@ class HRLModel(nn.Module):
 
     def _forward(self, pair, x, sample_num, epoch, is_test):
         debug_info = {}
-
-        assert x.size(0) > 1
+        assert x.size(0) > 1, f"Input sequence length should be greater than 1. \n{x}\n{pair}\n{x.size()}"
         # [A] [cake] [was] [cooked] [by] [the] [scientist]
-
+    
         bottom_idx = self.abstractor(x)
         # [1, 3, 6]
         # Corresponding to: cake, cooked, scientist
@@ -603,29 +612,17 @@ class HRLModel(nn.Module):
         # we iterate over samples of the batch, and apply semantic composition
         for in_batch_idx in range(sample_num):
             # the solvers walks the tree bottom up, applies semantic composition rules, and generates a logical form
-            final_semantic, normalized_entropy, semantic_log_prob, sem_debug_info = self.solver(pair, 
-                                                                                                head_dep_idx, 
-                                                                                                idx2contextual, 
-                                                                                                idx2output_token)
-
-            # debug prints
-            print(f"===== Input Sentence =====\n{pair[0]}")
-            print(f"===== Gold Label =====\n{pair[1]}")
-            print(f"===== Input Tree =====\n{head_dep_idx}")
-            print(f"===== Nodes =====\n{bottom_idx}")
-            print(f"===== Alignment =====\n{idx2output_token}")
-            print(f"===== Final Semantic =====\n{final_semantic}")
-            # end debug
-
-            # conver the gold label into a flat chain of tokens representing the logical form
-            label_chain, gold_debug_info = self.process_output(pair[1])
-            print(f"===== Gold Label Chain =====\n{label_chain}")
-            quit()
+            final_semantic, rl_info, debug_info["solver"] = self.solver(pair, 
+                                                                        head_dep_idx, 
+                                                                        idx2contextual, 
+                                                                        idx2output_token)
 
             # convert the resulting tree structure into a flat chain of tokens representing the logical form
-            pred_chain = self.translate(span2semantic[str(end_span)])
-            # pdb.set_trace()
-            
+            pred_edges = self.translate(final_semantic)
+
+            # conver the gold label into a flat chain of tokens representing the logical form
+            gold_edges, debug_info["process_gold"] = self.process_gold(pair[1])
+
 
             #if "who" in pair[1] or "what" in pair[1]:
             #    print("")
@@ -637,18 +634,9 @@ class HRLModel(nn.Module):
             #Predicted Label Chain ['cook', 'who', 'cake', 'beside', 'table', 'None']
 
             # and calculate the reward for the generated logical form by comparing to the gold
-            reward = self.get_reward(pred_chain, label_chain)
+            reward = self.get_reward(pred_edges, gold_edges)
 
-            # pdb.set_trace()
-
-            # combine the syntactic (from the composer) and semantic (from the solver) information to train jointly
-            normalized_entropy = tree_normalized_entropy[in_batch_idx] + \
-                                 semantic_normalized_entropy
-
-            log_prob = tree_log_prob[in_batch_idx] + \
-                       semantic_log_prob
-
-            batch_forward_info.append([normalized_entropy, log_prob, reward])
+            batch_forward_info.append([rl_info["normalized_entropy"], rl_info["semantic_log_prob"], reward])
 
             '''
             if pair[0] == 'a visitor gave a cookie to the girl that emma rolled':
@@ -659,58 +647,27 @@ class HRLModel(nn.Module):
                 print(pred_chain)
                 quit()
             '''            
+
         # pdb.set_trace()
         state = {
-            "bottom_span": bottom_span,
-            "span2output_token": span2output_token_batch,
-            "parent_child_spans": parent_child_spans,
-            "span2output_token": span2output_token,
-            "span2semantic": span2semantic,
-            "end_span": end_span,
-            "pred_chain": pred_chain,
-            "label_chain": label_chain,
+            "bottom_idx": bottom_idx,
+            "comp_heads": debug_info["composer"]["heads"],
+            "head_dep_edges": debug_info["solver"]["sorted_head_dep_idx"],
+            "pred_edges": pred_edges,
+            "gold_edges": gold_edges,
             "pair": pair,
-            "parent_json": span2semantic[str(end_span)].json_repr
+            "reward": reward
         }
 
-        return batch_forward_info, pred_chain, label_chain, state
+        return batch_forward_info, pred_edges, gold_edges, state
 
 
-    def get_reward(self, pred_chain, label_chain):
+    def get_reward(self, pred_edges, gold_edges):
         """ Calculate the reward for the generated logical form by comparing to the gold."""
-        # get lens
-        pred_len = len(pred_chain)
-        label_len = len(label_chain)
+        pred_set = set(['|'.join(edge) for edge in pred_edges])
+        gold_set = set(['|'.join(edge) for edge in gold_edges])
 
-        # longest common consecutive subsequence
-        max_com_len = 0
-
-        # for every token in the model's output
-        for pred_idx in range(pred_len):
-            # for every token in the gold label
-            for label_idx in range(label_len):
-                com_len = 0
-                if pred_chain[pred_idx] != label_chain[label_idx]:
-                    continue
-                else:
-                    com_len += 1
-                    right_hand_length = min(pred_len - pred_idx - 1, label_len - label_idx - 1)
-                    for right_hand_idx in range(right_hand_length):
-                        if pred_chain[pred_idx + right_hand_idx + 1] == label_chain[label_idx + right_hand_idx + 1]:
-                            com_len += 1
-                            continue
-                        else:
-                            break
-                    if com_len > max_com_len:
-                        max_com_len = com_len
-
-        reward = max_com_len / (pred_len + label_len - max_com_len)
-
-        assert reward <= 1.
-        if reward == 1.:
-            assert pred_chain == label_chain
-
-        return reward
+        return len(pred_set & gold_set) / len(gold_set)
 
     def get_entity_chain(self, semantic):
         if semantic is None:
@@ -740,52 +697,21 @@ class HRLModel(nn.Module):
         return action_info_dict
 
     # Translate a nest class into a list
-    def translate(self, semantic):
-        """ Takes a semantic class P and returns a flat list of tokens.
+    def translate(self, head_sem):
+        """ Takes a semantic class P and returns a flat list of edges.
         
         This is the final output of the model, and is used to generate the final logical form.
         """
-        # ensure tree root is a predicate
-        assert isinstance(semantic, P)
+        # we start with an empty chain of edges with shape [head, dep, rel_name]
+        edges = []
 
-        # we start with an empty chain of tokens, and iterate over the action chain of the tree
-        flat_chain = []
+        for child in head_sem.children:
+            edges.append([head_sem.token, child.token, child.rel])
+            # then we recursively call translate on the child
+            edges += self.translate(child)
+        return edges
 
-        for action_idx, action_info in enumerate(semantic.action_chain):
-            # action_info is a list of the form:
-            # [action_type, agent_obj, theme_obj, recipient_obj, action_word]
-
-            # [ccomp_word / xcomp_word, agent_entity_class, theme_entity_class, recipient_entity_class, action_word]
-            
-            # our first action is always a predicate, so we start with the action word
-            if action_idx == 0:
-                flat_action_chain = [action_info[4]]
-            # later actions have either a ccomp or xcopm, and then the action word
-            else:
-                assert action_info[0] is not None
-                flat_action_chain = [action_info[0], action_info[4]]
-
-            # if it is an xcomp, we use the previous action word as the agent for this action
-            # xcomp is for structures such as "the girl tried to roll", where the subjects of
-            # both "tried" and "roll" are the same
-            if action_info[0] == 'xcomp':
-                agent_chain = reserve_agent_chain
-            else:
-                agent_chain = self.get_entity_chain(action_info[1])
-            # we use get_entity_chain to flatten entities into its string components
-            theme_chain = self.get_entity_chain(action_info[2])
-            recipient_chain = self.get_entity_chain(action_info[3])
-
-            # compose a flat action chain from the action word and the agent, theme, and recipient chains
-            flat_action_chain = flat_action_chain + agent_chain + theme_chain + recipient_chain
-            reserve_agent_chain = copy.deepcopy(agent_chain)
-
-            # append the flat action chain to the flat chain
-            flat_chain = flat_chain + flat_action_chain
-
-        return flat_chain
-
-    def process_output(self, s):
+    def process_gold(self, s):
         # Examples:
         # * cake ( x _ 8 ) ; cat ( x _ 1 ) AND cat . nmod ( x _ 1 , x _ 3 ) AND admire . agent ( x _ 3 , x _ 1 ) AND admire . ccomp ( x _ 3 , x _ 6 ) AND eat . agent ( x _ 6 , Emily ) AND eat . theme ( x _ 6 , x _ 8 )
         # * muffin ( x _ 4 ) ; * painting ( x _ 7 ) ; * girl ( x _ 10 ) ; mail . recipient ( x _ 2 , Emma ) AND mail . theme ( x _ 2 , x _ 4 ) AND mail . agent ( x _ 2 , x _ 10 ) AND muffin . nmod . beside ( x _ 4 , x _ 7 )
