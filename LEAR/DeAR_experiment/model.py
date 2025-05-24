@@ -7,6 +7,7 @@ from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from utils import clamp_grad
 import copy
 
+from modules.BinaryTreeBasedModule import BinaryTreeBasedModule
 from modules.MSTDecoder import mst_decode
 
 USE_CUDA = torch.cuda.is_available()
@@ -131,103 +132,193 @@ class BottomClassifier(nn.Module):
         return idx2output_token
 
 
-class DepTreeComposer(nn.Module):
-    def __init__(self, input_dim, hidden_dim, vocab_size, input_lang,
-                 output_lang, alignments_idx={}, entity_list=[],
-                 caus_predicate_list=[], unac_predicate_list=[],
-                 dropout_prob=None, context_type="bilstm", num_layers=2, num_heads=4):
+class DepTreeComposer(BinaryTreeBasedModule):
+    def __init__(self, input_dim, hidden_dim, composer_trans_hidden, dropout_prob=None, 
+                 leaf_transformation="no_transformation", relaxed=False, tau_weights=None, 
+                 straight_through=False):
+        super().__init__(input_dim, hidden_dim, leaf_transformation, 
+                         composer_trans_hidden, dropout_prob)
 
-        super().__init__()
-
-        self.embd_parser = nn.Embedding(vocab_size, input_dim)
+        self.q = nn.Parameter(torch.empty(size=(hidden_dim,), dtype=torch.float32))
         self.hidden_dim = hidden_dim
-        self.context_type = context_type.lower()
-        self.input_lang = input_lang
-        self.output_lang = output_lang
-        self.alignments_idx = alignments_idx
-        self.entity_list = entity_list
-        self.predicate_list = caus_predicate_list + unac_predicate_list
-
-        self.linear = nn.Linear(input_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout_prob) if dropout_prob else nn.Identity()
-
-        self.arc_mlp_head = nn.Linear(hidden_dim, hidden_dim)
-        self.arc_mlp_dep = nn.Linear(hidden_dim, hidden_dim)
-
-        if self.context_type == "bilstm":
-            self.context_encoder = nn.LSTM(hidden_dim, hidden_dim // 2,
-                                           num_layers=1, batch_first=True, bidirectional=True)
-        elif self.context_type == "transformer":
-            encoder_layer = TransformerEncoderLayer(d_model=hidden_dim,
-                                                    nhead=num_heads,
-                                                    dim_feedforward=hidden_dim * 4,
-                                                    dropout=dropout_prob or 0.1,
-                                                    batch_first=True)
-            self.context_encoder = TransformerEncoder(encoder_layer, num_layers=num_layers)
-        else:
-            raise ValueError(f"Unknown context_type: {context_type}")
-
+        self.tau_weights = tau_weights
+        self.straight_through = straight_through
+        self.relaxed = relaxed
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.xavier_uniform_(self.arc_mlp_head.weight)
-        nn.init.xavier_uniform_(self.arc_mlp_dep.weight)
-        nn.init.xavier_uniform_(self.linear.weight)
+        super().reset_parameters()
+        nn.init.normal_(self.q, mean=0, std=0.01)
 
-    def encode_contextual(self, token_embeddings):
-        x = self.linear(token_embeddings.unsqueeze(0))  # (1, S, D)
-        x = self.dropout(x)
 
-        if self.context_type == "bilstm":
-            output, _ = self.context_encoder(x)
-        elif self.context_type == "transformer":
-            output = self.context_encoder(x)
-        return output.squeeze(0)  # (S, D)
+    def forward(self, x_embedding, bottom_idx):
+        """ Forward pass of the DepTreeComposer.
 
-    def score_arcs(self, hidden):
-        head_repr = self.arc_mlp_head(hidden)  # (S, D)
-        dep_repr = self.arc_mlp_dep(hidden)    # (S, D)
-        arc_scores = torch.matmul(head_repr, dep_repr.T)  # (S, S)
-        return arc_scores
-
-    def forward(self, x, bottom_idx):
+        Builds a dependency tree from the input sequence x, which is a sequence of token embeddings.
         """
-        Args:
-            x: (seq_len,) Tensor of token indices
+        # debug prints
+        #print(f"Bottom indices: {bottom_idx}")
 
-        Returns:
-            normalized_entropy: dummy tensor for API consistency
-            log_prob: dummy tensor for API consistency
-            head_dep_idx: list of (head, dependent) tuples
-        """
-        token_embeds = self.embd_parser(x)  # (S, input_dim)
 
-        contextualized = self.encode_contextual(token_embeds)  # (S, hidden_dim)
+
+        # Define edges and rl info
+        log_probs = []
+        entropies = []
+        edges = []
+
+        B = len(bottom_idx)
+        #print(f"Batch size: {B}")
+        mask = torch.ones((B,), dtype=torch.float32, device=x_embedding.device)
+        #print(f"Mask: {mask}")
+
         
-        # bottom_idx is a list containing only the indices of the important tokens
-        # we only keep the embeddings of the important tokens
-        bottom_contextualized = contextualized[bottom_idx]  # (B, hidden_dim) 
+        if USE_CUDA:
+            mask = mask.cuda()
 
-        # TODO: Replace with recurrent approach
-        arc_scores = self.score_arcs(bottom_contextualized)  # (B, B)
+        # next, we get the leaf embeddings of the input sequence (all tokens)
+        # this will be a hidden state and a cell state for each token in the input sequence
+        hidden_1, cell_1 = self._transform_leafs(x_embedding, mask)
+        hidden = hidden_1[bottom_idx]  # (B, D)
+        cell = cell_1[bottom_idx]  # (B, D)
 
-        heads = mst_decode(arc_scores)  # List[int]
-        head_dep_idx = [(heads[i], i) for i in range(len(heads))]
-
-        # map to original indices
-        # we expect the root to be a self-loop
-        head_dep_idx = [(bottom_idx[head], bottom_idx[dep]) if head != -1 else (bottom_idx[dep], bottom_idx[dep]) for head, dep in head_dep_idx]
-
-        idx2contextual = {str(bottom_idx[i]): bottom_contextualized[i] for i in range(bottom_contextualized.size(0))}
-        
-        debug_info = {
-            "x_input": x,
-            "bottom_idx": bottom_idx,
-            "arc_scores": arc_scores,
-            "heads": heads,
+        # Initial contextual embeddings
+        idx2contextual = {
+            str(bottom_idx[i]): hidden[i] for i in range(B)
         }
-        return head_dep_idx, idx2contextual, debug_info
+        
+        # debug prints
+        #print(f"Initial hidden state: {hidden.size()}, cell state: {cell.size()}")
 
+        edges = []
+        while len(edges) < len(bottom_idx) - 1:
+            
+
+            cat_distr, _, actions, hidden, cell = self._make_step(hidden, cell, mask)
+            
+            actions_idx_tensor = actions.argmax()
+            actions_idx = actions_idx_tensor.item()
+            B = hidden.size(0)
+            head_idx, dep_idx = divmod(actions_idx, B)
+
+            # Update contextual representation for the dependent
+            idx2contextual[str(bottom_idx[dep_idx])] = hidden[dep_idx]
+
+
+            log_probs.append(cat_distr.log_prob(actions_idx_tensor))
+            entropies.append(cat_distr.entropy)
+
+            edges.append((bottom_idx[head_idx], bottom_idx[dep_idx]))
+            mask[dep_idx] = 0  # Mark dep as attached
+            
+            # debug prints
+            #print(f"Current edges: {edges}")
+            #print(f"Action taken: {actions_idx} (head: {head_idx}, dep: {dep_idx})")
+            #print(f"Updated mask: {mask}")
+
+        
+        # Package outputs
+        rl_info = {
+            "normalized_entropy": torch.stack(entropies).mean(),
+            "log_prob": torch.stack(log_probs).sum()
+        }
+
+        # debug prints
+        #print(f"Edges: {edges}")
+        #print(f"RL Info: {rl_info}")
+
+        return edges, idx2contextual, rl_info
+    
+    def _make_step(self, hidden, cell, mask_ori):
+        """
+        One REINFORCE step over head → dep scoring using TreeLSTM.
+        Args:
+            hidden: (B, D)
+            cell: (B, D)
+            mask_ori: (B,) float — 1 if dep is unassigned
+            relaxed: Gumbel-softmax flag
+            tau_weights: Temperature schedule params
+            straight_through: ST-Gumbel flag
+            gumbel_noise: External noise (optional)
+            ev_actions: External action override
+        Returns:
+            cat_distr: Categorical distribution over valid arcs
+            gumbel_noise: Updated noise (if used)
+            actions: One-hot vector (N x P), P = num pairs
+            h_new, c_new: (B, D) updated hidden/cell with one arc applied
+        """
+        B, D = hidden.size()
+        device = hidden.device
+        mask = copy.deepcopy(mask_ori)
+
+        # Step 1: Build all (head, dep) pairs (excluding self-loops)
+        head_h = hidden.unsqueeze(1).expand(B, B, D)  # (B, B, D)
+        head_c = cell.unsqueeze(1).expand(B, B, D)
+        dep_h = hidden.unsqueeze(0).expand(B, B, D)
+        dep_c = cell.unsqueeze(0).expand(B, B, D)
+
+        # Compose head and dep via TreeLSTMCell
+        new_h, new_c = self.tree_lstm_cell(
+            head_h.reshape(-1, D),
+            head_c.reshape(-1, D),
+            dep_h.reshape(-1, D),
+            dep_c.reshape(-1, D)
+        )
+        new_h = new_h.view(B, B, D)
+        new_c = new_c.view(B, B, D)
+
+        # Score: dot product with q
+        score = torch.matmul(new_h, self.q)  # (B, B)
+
+        # Mask invalid arcs: self-loops and already-attached deps
+        arc_mask = torch.ones_like(score, dtype=torch.float32, device=device)
+        arc_mask.fill_diagonal_(0)  # no self-loops
+        arc_mask *= mask.unsqueeze(0)  # block already-attached deps (on dep axis)
+
+        flat_score = score.view(-1)
+        flat_mask = arc_mask.view(-1)
+
+        # Step 2: Categorical distribution
+        cat_distr = Categorical(flat_score, flat_mask)
+
+        actions, gumbel_noise = self._sample_action(cat_distr, flat_mask)
+
+        # Step 3: Merge via BinaryTreeBasedModule._merge
+        # Reshape to (B, B) one-hot for proper indexing
+        actions_2d = actions.view(B, B)
+
+        # Masked merge: merge selected (head, dep) into dep slot
+        new_h_merged, new_c_merged = BinaryTreeBasedModule._merge(
+            actions_2d, head_h, head_c, dep_h, dep_c, new_h, new_c, arc_mask
+        )
+
+        # Reduce to (B, D): we only want updated reprs for each dep
+        new_h_merged = (actions_2d.unsqueeze(-1) * new_h_merged).sum(dim=0)  # (B, D)
+        new_c_merged = (actions_2d.unsqueeze(-1) * new_c_merged).sum(dim=0)  # (B, D)
+
+        return cat_distr, gumbel_noise, actions, new_h_merged, new_c_merged
+
+
+
+    def _sample_action(self, cat_distr, mask):
+        noise = None
+        if self.training:
+            if self.relaxed:
+                N = mask.sum(dim=-1, keepdim=True)
+                tau = self.tau_weights[0] + self.tau_weights[1].exp() * torch.log(N + 1) + self.tau_weights[2].exp() * N
+                actions, noise = cat_distr.rsample(temperature=tau, gumbel_noise=noise)
+                if self.straight_through:
+                    actions_hard = torch.zeros_like(actions)
+                    actions_hard.scatter_(-1, actions.argmax(dim=-1, keepdim=True), 1.0)
+                    actions = (actions_hard - actions).detach() + actions
+                actions = clamp_grad(actions, -0.5, 0.5)
+            else:
+                actions, gumbel_noise = cat_distr.rsample(gumbel_noise=noise)
+        else:
+            actions = torch.zeros_like(cat_distr.probs)
+            actions.scatter_(-1, torch.argmax(cat_distr.probs, dim=-1, keepdim=True), 1.0)
+            gumbel_noise = None
+        return actions, gumbel_noise
+    
 
 class Solver(nn.Module):
     """ Solver class for the COGS model.
@@ -306,11 +397,15 @@ class Solver(nn.Module):
         semantic_normalized_entropy = []
         semantic_log_prob = []
 
-        # Example tree: [(1, 1), (8, 2), (8, 3), (8, 5), (1, 8)]
+        # Example tree: [(8, 2), (8, 3), (8, 5), (1, 8)]
         # Example idx2semantic: {"1": E("cake"), "3": P("cook")}
 
-        # Sort the head_dep_idx in a bottom-up manner (and remove root self-pair)
-        root_idx = [head for head, dep in head_dep_idx if head == dep][0]
+        # Find the root index: the only index that does not appear as a dependent
+        #print(f"head_dep_idx: {head_dep_idx}")
+        root_idx = set(head for head, _ in head_dep_idx) - set(dep for _, dep in head_dep_idx)
+        #print(f"Root index: {root_idx}")
+        assert len(root_idx) == 1, f"Expected exactly one root, got {root_idx} from {head_dep_idx}"
+        root_idx = list(root_idx)[0]
         debug_info["root_idx"] = root_idx
 
         head_dep_idx = self.sort_bottom_up(head_dep_idx)
@@ -547,21 +642,12 @@ class HRLModel(nn.Module):
         self.entity_list = entity_list
         self.caus_predicate_list = caus_predicate_list
         self.unac_predicate_list = unac_predicate_list
+        self.embd_parser = nn.Embedding(vocab_size, word_dim)
         self.abstractor = BottomAbstrator(alignments_idx)
         self.classifier = BottomClassifier(output_lang, alignments_idx)
-        self.composer = DepTreeComposer(
-            input_dim=word_dim,
-            hidden_dim=hidden_dim,
-            vocab_size=vocab_size,
-            input_lang=input_lang,
-            output_lang=output_lang,
-            alignments_idx=alignments_idx,
-            entity_list=entity_list,
-            caus_predicate_list=caus_predicate_list,
-            unac_predicate_list=unac_predicate_list,
-            dropout_prob=None,
-            context_type="bilstm",
-        )
+
+        self.composer = DepTreeComposer(input_dim=word_dim, hidden_dim=hidden_dim, 
+                                        composer_trans_hidden=composer_trans_hidden)
         self.solver = Solver(hidden_dim, output_lang,
                              entity_list=entity_list,
                              caus_predicate_list=caus_predicate_list,
@@ -602,18 +688,21 @@ class HRLModel(nn.Module):
         #bottom_idx_batch = [bottom_idx for _ in range(sample_num)]
         #idx2output_token_batch = [idx2output_token for _ in range(sample_num)]
 
-        # tree_rl_info has one entry per sample of the batch
-        # it contains the normalized entropy, log prob, parent-child pairs (the merges that were made) and idx2repre (embeddings of tokens)
-        # span2variable_batch contains a mapping of the abstracted spans ([1, 1]) to the tokens (cake, cooked, scientist)
-        head_dep_idx, idx2contextual, debug_info["composer"] = self.composer(x, bottom_idx)
-
         batch_forward_info = []
+        
+        # Get embeddings
+        x_embedding = self.embd_parser(x)
 
         # we iterate over samples of the batch, and apply semantic composition
         for in_batch_idx in range(sample_num):
+            #print(f"Pair: {pair}")
+            # it contains the normalized entropy, log prob, parent-child pairs (the merges that were made) and idx2repre (embeddings of tokens)
+            # span2variable_batch contains a mapping of the abstracted spans ([1, 1]) to the tokens (cake, cooked, scientist)
+            edges, idx2contextual, debug_info["composer"] = self.composer(x_embedding, bottom_idx)
+
             # the solvers walks the tree bottom up, applies semantic composition rules, and generates a logical form
             final_semantic, rl_info, debug_info["solver"] = self.solver(pair, 
-                                                                        head_dep_idx, 
+                                                                        edges, 
                                                                         idx2contextual, 
                                                                         idx2output_token)
 
@@ -646,8 +735,14 @@ class HRLModel(nn.Module):
                 print("Saved debug info")
                 print(pred_chain)
                 quit()
-            '''            
+            '''   
 
+            #print(debug_info["composer"])
+            #print(debug_info["solver"])
+            #print(f"Predicted edges: {pred_edges}")
+            #print(f"Gold edges: {gold_edges}")
+            #print(f"Reward: {reward}")         
+            #quit()
         # pdb.set_trace()
         state = {
             "bottom_idx": bottom_idx,

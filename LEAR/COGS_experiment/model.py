@@ -453,7 +453,7 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                                                                   straight_through, noise,
                                                                   ev_actions)
             
-            # choose the action with the highest score and get the hidden state of the parent span
+            # choose the token  with the highest score and get the hidden state of the parent span
             actions_idx = actions.argmax(dim=1)
             hidden_parent = hidden[torch.arange(hidden.shape[0]), actions_idx]  # batch_size * hidden_size
 
