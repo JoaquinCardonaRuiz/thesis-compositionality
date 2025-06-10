@@ -29,7 +29,7 @@ class LstmRnn(nn.Module):
         h = []
         for idx in range(L):
             idx = L - 1 - idx if backward else idx
-            mask_idx = mask[:, idx, None]
+            mask_idx = mask[idx].unsqueeze(0).expand_as(prev_h)
 
             h_idx, c_idx = self.lstm(x[:, idx], (prev_h, prev_c))
             prev_h = h_idx * mask_idx + prev_h * (1. - mask_idx)

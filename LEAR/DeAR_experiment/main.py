@@ -274,10 +274,10 @@ def test(test_data, model, example2type, device, log_file=None):
             batch_forward_info, pred_chain, label_chain, state = model(test_data_example, tokens, 1, is_test=True)
 
             # pdb.set_trace()
-            normalized_entropy, log_prob, reward = batch_forward_info[0]
+            composer_rl_info, solver_rl_info = batch_forward_info[0]
 
-            normalized_entropy = normalized_entropy.mean()
-            accuracy = [1. if (reward == 1) else 0.]
+            normalized_entropy = composer_rl_info['normalized_entropy'].mean() + solver_rl_info['normalized_entropy'].mean()
+            accuracy = [1. if (composer_rl_info['reward'] == 1 and solver_rl_info['reward'] == 1) else 0.]
             # pdb.set_trace()
             accuracy = torch.tensor(accuracy).mean()
 
@@ -348,7 +348,7 @@ def validate(valid_data, model, epoch, device, logger):
             # print('--' * 20)
             # print(valid_data_example[0])
             batch_forward_info, pred_chain, label_chain, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
-            normalized_entropy, log_prob, reward = batch_forward_info[0]
+            composer_rl_info, solver_rl_info = batch_forward_info[0]
 
             """
             logging into visualizer
@@ -360,8 +360,8 @@ def validate(valid_data, model, epoch, device, logger):
             # visualizer.log_text(valid_data_example[1], tree, pred_labels, seq, debug_info)
             # visualizer.update_step()
 
-            normalized_entropy = normalized_entropy.mean()
-            accuracy = [1. if (reward == 1) else 0.]
+            normalized_entropy = composer_rl_info['normalized_entropy'].mean() + solver_rl_info['normalized_entropy'].mean() 
+            accuracy = [1. if (composer_rl_info['reward'] == 1 and solver_rl_info['reward'] == 1) else 0.]
             accuracy = torch.tensor(accuracy).mean()
 
             # if accuracy == 1:
@@ -373,7 +373,7 @@ def validate(valid_data, model, epoch, device, logger):
             #         f.write(valid_data_example[0] + '\n')
             #         f.write(valid_data_example[1] + '\n\n')
 
-            ce_loss = accuracy
+            ce_loss = torch.tensor([(composer_rl_info['reward']/2 + solver_rl_info['reward'])/2]).mean()
             n = 1
             accuracy_meter.update(accuracy.item(), n)
             ce_loss_meter.update(ce_loss.item(), n)
@@ -409,7 +409,8 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
     prob_ratio_meter = AverageMeter()
     reward_std_meter = AverageMeter()
 
-    device = args.gpu_id
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     model.train()
     start = time.time()
 
@@ -438,14 +439,17 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
 
         loading_time_meter.update(time.time() - start)
 
+        semantic_log_probs = []
+        semantic_entropies = []
+        composer_log_probs = []
+        composer_entropies = []
+        solver_rewards = []
+        composer_rewards = []
         normalized_entropy_samples = []
-        log_prob_samples = []
-        rewards_samples = []
-
         accuracy_samples = []
         rewards_all = []
 
-        sample_num = 10
+        sample_num = 25
 
         for example_idx in range(batch_size):
             train_pair = train_pairs[example_idx]
@@ -462,50 +466,63 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
                 model(train_pair, tokens, sample_num, is_test=False, epoch=epoch)
 
             for forward_info in batch_forward_info:
-                normalized_entropy, log_prob, reward = forward_info
+                composer_rl_info, solver_rl_info = forward_info
 
-                accuracy = 1. if (reward == 1) else 0.
-
-                normalized_entropy_samples.append(normalized_entropy)
-                log_prob_samples.append(log_prob)
-                rewards_samples.append(reward)
-
-                rewards_all.append(reward)
+                accuracy = 1. if (composer_rl_info['reward'] == 1 and solver_rl_info['reward'] == 1) else 0.
                 accuracy_samples.append(accuracy)
+
+                semantic_log_probs.append(solver_rl_info["log_prob"])
+                semantic_entropies.append(solver_rl_info["normalized_entropy"])
+                composer_log_probs.append(composer_rl_info["log_prob"])
+                composer_entropies.append(composer_rl_info["normalized_entropy"])
+                solver_rewards.append(torch.tensor([solver_rl_info['reward']], device=device))
+                composer_rewards.append(torch.tensor([composer_rl_info['reward']], device=device))
+
+                normalized_entropy_samples.append(solver_rl_info['normalized_entropy'] + 
+                                                composer_rl_info['normalized_entropy'])
+                rewards_all.append(solver_rl_info['reward'] + composer_rl_info['reward'])
         
+        # Stack tensors
         normalized_entropy_samples = torch.cat(normalized_entropy_samples, dim=0)
         accuracy_samples = torch.tensor(accuracy_samples)
         rewards_all = torch.tensor(rewards_all)
-        rewards_samples = torch.tensor(rewards_samples)
+        
+        semantic_log_probs = torch.cat(semantic_log_probs)
+        semantic_entropies = torch.cat(semantic_entropies)
+        composer_log_probs = torch.cat(composer_log_probs)
+        composer_entropies = torch.cat(composer_entropies)
+        solver_rewards = torch.cat(solver_rewards)
+        composer_rewards = torch.cat(composer_rewards)
 
-        if USE_CUDA:
-            accuracy_samples = accuracy_samples.cuda()
-            rewards_all = rewards_all.cuda()
-            rewards_samples = rewards_samples.cuda()
+        # Optionally normalize (baseline)
+        solver_advantage = solver_rewards - solver_rewards.mean()
+        composer_advantage = composer_rewards - composer_rewards.mean()
 
-        baseline = rewards_all.mean()
-        accuracy = accuracy_samples.mean()
+        # ── compute the two losses exactly as before ──
+        loss_solver   = -(solver_advantage.detach()   * semantic_log_probs).mean()
+        loss_composer = -(composer_advantage.detach() * composer_log_probs).mean()
 
-        if baseline:
-            rewards_samples = rewards_samples - baseline
-        # pdb.set_trace()
-        log_prob_samples = torch.cat(log_prob_samples, dim=0)
+        # ── clear all grads first ──
+        optimizer["high"].zero_grad()
+        optimizer["low"].zero_grad()
 
-        prob_ratio = (log_prob_samples - log_prob_samples.detach()).exp()
-        # prob_ratio = log_prob_samples
-        loss = (prob_ratio * rewards_samples).mean()
-        # pdb.set_trace()
+        # ── backward passes ──
+        loss_composer.backward(retain_graph=True)   # high-level grads
+        loss_solver.backward()                      # low-level  grads
 
-        loss = loss - regular_weight * normalized_entropy_samples.mean()
-
-        loss.backward()
+        # ── now step each optimiser ──
         perform_high_optimizer_step(optimizer, model, args)
         perform_low_optimizer_step(optimizer, model, args)
 
+        # (optional) log a joint loss value for monitoring
+        loss = (loss_solver + loss_composer) / 2
+
+        
         normalized_entropy = normalized_entropy_samples.mean()
         n = batch_size * sample_num
 
         ce_loss = rewards_all.mean()
+        accuracy = accuracy_samples.mean()
         accuracy_meter.update(accuracy.item(), n)
         ce_loss_meter.update(ce_loss.item(), n)
         reward_std_meter.update(rewards_all.std().item(), n)
@@ -517,10 +534,10 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         global global_step
         global_step += 1
 
-        if batch_num <= 3000:
+        if batch_num <= 500:
             val_num = batch_num
         else:
-            val_num = 3000
+            val_num = 500
 
         print(f"Train: epoch: {epoch + 1} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
         if (batch_idx + 1) % (val_num) == 0:

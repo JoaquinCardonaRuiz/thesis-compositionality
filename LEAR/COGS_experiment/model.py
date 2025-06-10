@@ -432,7 +432,6 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
         normalized_entropy = []
         log_prob = []
 
-        # masks for cuda, this is not used
         mask = torch.ones((batch_size, length_ori), dtype=torch.float32)
         if USE_CUDA:
             mask = mask.cuda()
@@ -487,7 +486,6 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                 # update original reduce_span_in_all_span_batch
                 reduce_span_in_all_span_batch[in_batch_idx] = \
                     reduce_span_in_all_span[:action_idx] + [reduce_span] + reduce_span_in_all_span[action_idx + 2:]
-
                 # If both children of the parent span are abstracted, we also abstract the parent span
                 if len(reduce_span) >= 2:
                     assert len(reduce_span) == 2
@@ -513,7 +511,6 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
                     # parent_child_span is [parent, children], [[2,4], [[2,2], [4,4]]]
                     parent_child_span = [merged_span, reduce_span]
                     parent_child_spans_batch[in_batch_idx].append(parent_child_span)
-
             # masks for only the samples which have performed an abstraction on a merged span
             reduce_mask = [1 if i in reduce_list else 0 for i in range(batch_size)]
             reduce_mask = torch.tensor(reduce_mask, dtype=torch.float32)
@@ -528,6 +525,9 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
             var_normalized_entropy.append(var_cat_distr.normalized_entropy * reduce_mask)
             var_log_prob.append(-var_cat_distr.log_prob(var_actions) * reduce_mask)
 
+            print(f"Merges: {parent_child_spans_batch[0]}")
+            print(f"span_start_end: {span_start_end_batch[0]}")
+        quit()
         log_prob = sum(log_prob) + sum(var_log_prob)
 
         normalized_entropy = (sum(normalized_entropy) + sum(var_normalized_entropy)) / (
@@ -974,7 +974,7 @@ class HRLModel(nn.Module):
         self.unac_predicate_list = unac_predicate_list
         self.abstractor = BottomAbstrator(alignments_idx)
         self.classifier = BottomClassifier(output_lang, alignments_idx)
-        self.composer = BottomUpTreeComposer(word_dim, hidden_dim, vocab_size, "no_transformation",
+        self.composer = BottomUpTreeComposer(word_dim, hidden_dim, vocab_size, "bi_lstm_transformation",
                                              composer_trans_hidden, input_lang, output_lang,
                                              alignments_idx=alignments_idx,
                                              entity_list=entity_list,
