@@ -13,3 +13,4 @@ test.py
 test_results.txt
 LEAR/DeAR_experiment/modules/__pycache__/*
 .vscode/sessions.json
+aws.creds

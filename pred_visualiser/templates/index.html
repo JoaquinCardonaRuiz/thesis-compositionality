@@ -1,5 +1,5 @@
-  <!DOCTYPE html>
-  <html lang="en" data-bs-theme="light">
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
   <head>
     <meta charset="UTF-8">
     <title>TSV Tree Viewer</title>
@@ -10,10 +10,12 @@
       :root[data-bs-theme='light'] {
         --node-text-color: #333;
         --sub-index-color: gray;
+        --bs-body-bg: #fff;
       }
       :root[data-bs-theme='dark'] {
         --node-text-color: #ddd;
         --sub-index-color: #aaa;
+        --bs-body-bg: #121212;
       }
       html, body {
         margin: 0;
@@ -23,7 +25,11 @@
         font-family: 'Inter', 'Segoe UI', sans-serif;
       }
       body {
-        display: flex;
+        display: block;
+        background-color: var(--bs-body-bg);
+      }
+      #topbar {
+        height: 50px;
       }
       #sidebar {
         width: 30%;
@@ -33,7 +39,7 @@
         display: flex;
         flex-direction: column;
       }
-      #rowList {
+      #rowList, #logList {
         flex: 1;
         overflow-y: auto;
       }
@@ -68,7 +74,6 @@
       .word-block span { display: block; }
       .node-label { fill: var(--node-text-color); }
       .sub-index { fill: var(--sub-index-color); font-size: 12px; }
-
       pre#jsonDisplay {
         font-family: monospace;
         font-size: 14px;
@@ -79,60 +84,149 @@
         overflow-x: auto;
         white-space: pre-wrap;
       }
-      .json-key      { color: #6a1b9a; font-weight: bold; }
-      .json-string   { color: #2a7bde; }
-      .json-number   { color: #c62828; }
-      .json-boolean  { color: #2e7d32; font-weight: bold; }
-      .json-null     { color: #757575; font-style: italic; }
+      .json-key { color: #6a1b9a; font-weight: bold; }
+      .json-string { color: #2a7bde; }
+      .json-number { color: #c62828; }
+      .json-boolean { color: #2e7d32; font-weight: bold; }
+      .json-null { color: #757575; font-style: italic; }
     </style>
   </head>
   <body>
-  <div id="sidebar">
-    <div class="toggle-container d-flex gap-2 align-items-center mb-3">
-      <h5 class="mb-0">Visualise Model Predictions</h5>
-      <button id="themeToggle" class="btn btn-outline-secondary btn-sm ms-auto">🌙</button>
+  <div class="w-100 border-bottom px-3 py-2 d-flex align-items-center justify-content-between" id="topbar">
+    <div>
+      <button id="tabPredictions" class="btn btn-link fw-bold">Predictions</button>
+      <button id="tabLogs" class="btn btn-link text-secondary">Logs</button>
     </div>
-    <div class="filters-container d-flex gap-2 mb-3">
-      <select id="fileSelect" class="form-select"></select>
-      <select id="filterSelect" class="form-select">
-        <option value="all">Show All</option>
-        <option value="correct">Correct</option>
-        <option value="incorrect">Incorrect</option>
-      </select>
-      <select id="catSelect" class="form-select"></select>
+    <div>
+      <button id="themeToggle" class="btn btn-outline-secondary btn-sm">🌙</button>
     </div>
-    <h6 id="sentListTitle">Sentences </h6>
-    <div id="rowList" class="list-group"></div>
   </div>
-  <div id="viewer">
-    <div id="sentenceLabel"></div>
-    <div id="treeViz"></div>
+  <div id="predictionsScreen" style="height: calc(100% - 50px); display: flex;">
+    <div id="sidebar">
+      <div class="toggle-container d-flex gap-2 align-items-center mb-3">
+        <h5 class="mb-0">Visualise Model Predictions</h5>
+      </div>
+      <div class="filters-container d-flex gap-2 mb-3">
+        <select id="fileSelect" class="form-select"></select>
+        <select id="filterSelect" class="form-select">
+          <option value="all">Show All</option>
+          <option value="correct">Correct</option>
+          <option value="incorrect">Incorrect</option>
+        </select>
+        <select id="catSelect" class="form-select"></select>
+      </div>
+      <h6 id="sentListTitle">Sentences </h6>
+      <div id="rowList" class="list-group"></div>
+    </div>
+    <div id="viewer">
+      <div id="sentenceLabel"></div>
+      <div id="treeViz"></div>
+      <div class="p-2 text-end">
+        <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#jsonModal">View Full JSON</button>
+      </div>
+    </div>
   </div>
-  <div class="p-2 text-end">
-    <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#jsonModal">View Full JSON</button>
+  <div id="logsScreen" style="display: none; height: calc(100% - 50px); display: flex;">
+    <div id="sidebar">
+      <div class="toggle-container d-flex gap-2 align-items-center mb-3">
+        <h5 class="mb-0">Explore Run Logs</h5>
+      </div>
+      <div class="filters-container d-flex gap-2 mb-3">
+        <select id="log-group-dropdown" class="form-select">
+          <option value="">-- Select Log Group --</option>
+          <option value="thesis-test-logs">thesis-test-logs</option>
+          <option value="thesis-train-logs">thesis-train-logs</option>
+        </select>
+      </div>
+      <h6 id="logListTitle">Log Streams</h6>
+      <div id="logList" class="list-group"></div>
+    </div>
+    <div id="viewer" class="p-4">
+      <p>This section will display logs in the future.</p>
+    </div>
+  </div>
+  <div class="modal fade" id="jsonModal" tabindex="-1" aria-labelledby="jsonModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="jsonModalLabel">Full JSON</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <pre id="jsonDisplay" style="white-space: pre-wrap;"></pre>
+        </div>
+      </div>
+    </div>
   </div>
   <script>
+    // Tab switch logic
+    document.getElementById('tabPredictions').addEventListener('click', () => {
+      document.getElementById('predictionsScreen').style.display = 'flex';
+      document.getElementById('logsScreen').style.display = 'none';
+      document.getElementById('tabPredictions').classList.add('fw-bold');
+      document.getElementById('tabLogs').classList.remove('fw-bold');
+      document.getElementById('tabPredictions').classList.remove('text-secondary');
+      document.getElementById('tabLogs').classList.add('text-secondary');
+    });
+    document.getElementById('tabLogs').addEventListener('click', () => {
+      document.getElementById('predictionsScreen').style.display = 'none';
+      document.getElementById('logsScreen').style.display = 'flex';
+      document.getElementById('tabPredictions').classList.remove('fw-bold');
+      document.getElementById('tabLogs').classList.add('fw-bold');
+      document.getElementById('tabPredictions').classList.add('text-secondary');
+      document.getElementById('tabLogs').classList.remove('text-secondary');
+    });
+
+  </script>
+  <script>
     let currentRows = [];
+
 
     async function loadFiles() {
       const res = await fetch('/api/files');
       const files = await res.json();
       const select = document.getElementById('fileSelect');
-      select.innerHTML = files.map(f => `<option value="${f}">${f}</option>`).join('');
-      select.addEventListener('change', () => loadFile(select.value));
-      if (files.length > 0) loadFile(files[0]);
+
+      // Add empty option first
+      select.innerHTML = `<option value="">-- Select a file --</option>` + 
+        files.map(f => `<option value="${f}">${f}</option>`).join('');
+
+      // Add/change handler
+      select.addEventListener('change', () => {
+        // Clear sentence list and label immediately
+        document.getElementById('rowList').innerHTML = '';
+        document.getElementById('sentenceLabel').innerHTML = '';
+        document.getElementById('treeViz').innerHTML = '';
+        document.getElementById('sentListTitle').textContent = 'Sentences';
+
+        if (select.value) {
+          loadFile(select.value);
+        } else {
+          currentRows = [];
+        }
+      });
     }
 
     async function loadFile(filename) {
-      const res = await fetch(`/api/file/${filename}`);
-      currentRows = await res.json();
+      if (!filename) return;
 
-      const catSelect = document.getElementById('catSelect');
-      const categories = Array.from(new Set(currentRows.map(row => row.category)));
-      catSelect.innerHTML = `<option value="all">Show All</option>` + categories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+      try {
+        const res = await fetch(`/api/file/${filename}`);
+        currentRows = await res.json();
 
-      updateRowList();
+        const catSelect = document.getElementById('catSelect');
+        const categories = Array.from(new Set(currentRows.map(row => row.category)));
+        catSelect.innerHTML = `<option value="all">Show All</option>` + 
+          categories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+
+        updateRowList();
+      } catch (e) {
+        console.error("Failed to load file:", e);
+        currentRows = [];
+        document.getElementById('rowList').innerHTML = '';
+      }
     }
+
 
     function calculateAccuracy() {
       const filter = document.getElementById('filterSelect').value;
@@ -234,32 +328,106 @@
       ).join('');
     }
 
-    document.getElementById('themeToggle').addEventListener('click', () => {
-      const html = document.documentElement;
-      const current = html.getAttribute('data-bs-theme');
-      const newTheme = current === 'light' ? 'dark' : 'light';
-      html.setAttribute('data-bs-theme', newTheme);
+  document.getElementById('themeToggle').addEventListener('click', () => {
+    const html = document.documentElement;
+    const current = html.getAttribute('data-bs-theme');
+    const newTheme = current === 'light' ? 'dark' : 'light';
+    html.setAttribute('data-bs-theme', newTheme);
 
-      document.getElementById('themeToggle').textContent = newTheme === 'light' ? '🌙' : '☀️';
-      // change jsonDisplay background-color
-      const jsonDisplay = document.getElementById('jsonDisplay');
+    // Update toggle button icon
+    document.getElementById('themeToggle').textContent = newTheme === 'light' ? '🌙' : '☀️';
+
+    // Update background for JSON display
+    const jsonDisplay = document.getElementById('jsonDisplay');
+    if (jsonDisplay) {
       jsonDisplay.style.backgroundColor = newTheme === 'dark' ? '#212529' : '#f8f9fa';
-      
-      
-      const badges = document.querySelectorAll('.badge');
-      badges.forEach(badge => {
-        if (newTheme === 'dark') {
-          badge.classList.remove('bg-light', 'text-dark');
-          badge.classList.add('bg-dark', 'text-light');
-        } else {
-          badge.classList.remove('bg-dark', 'text-light');
-          badge.classList.add('bg-light', 'text-dark');
-        }
-      });
+    }
+
+    // Update badge styling
+    const badges = document.querySelectorAll('.badge');
+    badges.forEach(badge => {
+      badge.classList.remove('bg-light', 'text-dark', 'bg-dark', 'text-light');
+      if (newTheme === 'dark') {
+        badge.classList.add('bg-dark', 'text-light');
+      } else {
+        badge.classList.add('bg-light', 'text-dark');
+      }
     });
+  });
+    let currentLogGroup = null;
+    document.getElementById('log-group-dropdown').addEventListener('change', async () => {
+      currentLogGroup = document.getElementById('log-group-dropdown').value;
+      document.getElementById('logList').innerHTML = '';
+
+      if (!currentLogGroup) return;
+
+      try {
+        const res = await fetch(`/api/cw/${currentLogGroup}/streams`);
+        const streams = await res.json();
+        updateLogList(streams);
+      } catch (err) {
+        console.error("Error fetching log streams:", err);
+      }
+    });
+
 
     document.getElementById('filterSelect').addEventListener('change', updateRowList);
     document.getElementById('catSelect').addEventListener('change', updateRowList);
+
+    async function fetchLogStreamEvents(logGroup, logStream) {
+      try {
+        const res = await fetch(`/api/cw/${logGroup}/${logStream}/events`);
+        const events = await res.json();
+
+        const viewer = document.querySelector('#logsScreen #viewer');
+        viewer.innerHTML = `
+          <div class="p-3">
+            <h5 class="mb-3">${logStream}</h5>
+            <pre id="logContent" style="white-space: pre-wrap; font-size: 14px;"></pre>
+          </div>`;
+
+        const logContent = document.getElementById('logContent');
+        logContent.textContent = events.map(e =>
+          `[${new Date(e.timestamp).toISOString()}] ${e.message}`
+        ).join('\n');
+      } catch (err) {
+        console.error("Failed to load log events:", err);
+        const viewer = document.querySelector('#logsScreen #viewer');
+        viewer.innerHTML = `<div class="p-3 text-danger">Error loading log events for ${logStream}</div>`;
+      }
+    }
+
+
+
+    function updateLogList(streams) {
+      const list = document.getElementById('logList');
+      list.innerHTML = '';
+
+      streams.forEach((stream) => {
+        const item = document.createElement('div');
+        item.className = 'list-group-item list-group-item-action d-flex justify-content-between align-items-center';
+
+        const btn = document.createElement('button');
+        btn.className = 'btn flex-grow-1 text-start p-0';
+        btn.textContent = stream.logStreamName;
+
+        const uid = stream.logStreamUid || '(no UID)';
+        const badge = document.createElement('span');
+        badge.className = 'badge bg-light text-dark';
+        badge.textContent = uid;
+        badge.title = uid;
+
+        // 👇 Fetch and display events when clicked
+        item.onclick = () => {
+          fetchLogStreamEvents(currentLogGroup, stream.logStreamName);
+        };
+
+        item.appendChild(btn);
+        item.appendChild(badge);
+        list.appendChild(item);
+      });
+    }
+
 
     function renderSpan2TokenTable(span2token, svg, xoffset) {
       const group = svg.append("g").attr("transform", `translate(${xoffset}, 300)`);

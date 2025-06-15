@@ -3,138 +3,65 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
-import torch
 import logging
-from functools import partial
-from torch.nn import functional as F
-from tensorboardX import SummaryWriter
-from torch.distributions.utils import lazy_property
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.distributions.categorical import Categorical as TorchCategorical
+import math
 import os
-import numpy as np
+import time
+import uuid
+from functools import partial
+
+import boto3
+import botocore.exceptions
+import torch
+from torch.distributions.categorical import Categorical as TorchCategorical
+from torch.distributions.utils import lazy_property
+from torch.nn import functional as F
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 
-class VisualizeLogger(object):
-    EMOJI_CORRECT = "&#128523;"
-    EMOJI_ERROR = "&#128545;"
-    EMOJI_REWARD = "🍎"
-    EMOJI_DECODE_REWARD = "🍐"
+class CloudWatchLogsHandler(logging.Handler):
+    """
+    A minimal, thread-unsafe (only one process at a time) handler that ships each
+    log record to a dedicated CloudWatch Logs stream.
+    """
+    def __init__(self, log_group: str, log_stream: str, session: boto3.Session):
+        super().__init__()
+        self.log_group  = log_group
+        self.log_stream = log_stream
+        self.client     = session.client("logs")
+        self.sequence_token = None          # updated after every put_log_events
 
-    def __init__(self, summary_dir):
-        """
+        try:
+            self.client.create_log_stream(
+                logGroupName=log_group, logStreamName=log_stream
+            )
+        except self.client.exceptions.ResourceAlreadyExistsException:
+            # fetch existing upload token
+            resp = self.client.describe_log_streams(
+                logGroupName=log_group, logStreamNamePrefix=log_stream
+            )
+            if resp["logStreams"]:
+                self.sequence_token = resp["logStreams"][0].get("uploadSequenceToken")
 
-        :param summary_dir: folder to store the tensorboard X log files
-        :param validation_size:
-        """
-        if not os.path.exists(summary_dir):
-            os.makedirs(summary_dir)
 
-        self.log_writer = SummaryWriter(summary_dir)
-        self.global_step = 0
-        self.validate_no = 1
-        self.validation_size = 1
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            event = {"timestamp": int(time.time() * 1000), "message": msg}
 
-        # define template
-        self.log_template = '**Input**   :   {4} \n\n **Reduce**  :  {1} \n\n **Ground**: {2} \n\n{0}**Logic Form**: {3} \n\n'
+            kwargs = dict(
+                logGroupName = self.log_group,
+                logStreamName = self.log_stream,
+                logEvents = [event],
+            )
+            if self.sequence_token:
+                kwargs["sequenceToken"] = self.sequence_token
 
-    def update_validate_size(self, validation_size):
-        self.validation_size = validation_size
-
-    def log_text(self, ground_truth, reduce_str, logic_form, utterance, debug_info=None):
-        is_correct = ground_truth == logic_form
-        if is_correct:
-            logging_str = self.log_template.format(self.EMOJI_CORRECT, reduce_str, ground_truth, logic_form, utterance)
-        else:
-            logging_str = self.log_template.format(self.EMOJI_ERROR, reduce_str, ground_truth, logic_form, utterance)
-        if debug_info is not None:
-            tree_vis = self._format_tree_prob(utterance, debug_info)
-            logging_str += "**Tree**  :\n\n" + tree_vis
-        dev_case = self.global_step % self.validation_size
-        dev_step = self.global_step // self.validation_size
-        self.log_writer.add_text(f'{dev_case}-th Example', logging_str, global_step=dev_step)
-
-    def log_performance(self, valid_acc):
-        self.log_writer.add_scalar("Accuracy", valid_acc, global_step=self.validate_no)
-
-    def update_step(self):
-        self.global_step += 1
-
-    def update_epoch(self):
-        self.validate_no += 1
-
-    def _format_tree_prob(self, utterance, debug_info):
-        # accept utterance and debug_info, return the visualized tree prob
-        tokens = utterance.split(" ")
-        seq_len = len(tokens)
-        merge_probs = debug_info["merge_prob"]
-        reduce_probs = debug_info["reduce_prob"]
-        decoder_inputs = debug_info["decoder_inputs"]
-        decoder_outputs = debug_info["decoder_outputs"]
-
-        reduce_rewards = debug_info["tree_sr_rewards"]
-        decode_rewards = debug_info["decode_rewards"]
-
-        log_strs = []
-        right_single = "■■"
-        error_single = "□□"
-        # merged chain
-        merge_template = "{3} {0} ({1:.2f}) ({2:.2f})"
-        no_merge_template = "{2} {0} ({1:.2f})"
-        only_reduce_template = "{0} (1.00) ({1:.2f})"
-
-        start_indicator = 0
-        depth_indicator = 0
-        decode_indicator = 0
-        if seq_len == 1:
-            log_str = only_reduce_template.format(tokens[0], reduce_probs[0])
-            log_strs.append(log_str)
-        else:
-            for reverse_len in reversed(range(1, seq_len)):
-                if depth_indicator == 0:
-                    # reduce single node
-                    for i in range(seq_len):
-                        log_str = only_reduce_template.format(tokens[i], reduce_probs[i])
-                        if decoder_outputs[i] != 'NONE':
-                            log_str += " ({1}{0:.2f})".format(reduce_rewards[i], self.EMOJI_REWARD)
-                            log_str += " [*input*: {0}, *output*: {1}]".format(decoder_inputs[i], decoder_outputs[i])
-                            log_str += " ({1}{0:.2f})".format(decode_rewards[decode_indicator],
-                                                              self.EMOJI_DECODE_REWARD)
-                            decode_indicator += 1
-                        else:
-                            log_str += " ({1}{0:.2f})".format(reduce_rewards[i], self.EMOJI_REWARD)
-                        log_strs.append(log_str)
-                    depth_indicator += 1
-
-                layer_merge_prob = merge_probs[start_indicator: start_indicator + reverse_len]
-                start_indicator += reverse_len
-                layer_reduce_prob = reduce_probs[seq_len + depth_indicator - 1]
-                merge_candidates = ["-".join(tokens[i: i + depth_indicator + 1]) for i in range(reverse_len)]
-                ind = np.argmax(layer_merge_prob)
-                for i in range(reverse_len):
-                    if i == ind:
-                        log_str = merge_template.format(merge_candidates[i], layer_merge_prob[i],
-                                                        layer_reduce_prob,
-                                                        right_single * depth_indicator)
-                        if decoder_outputs[seq_len + depth_indicator - 1] != "NONE":
-                            log_str += " ({1}{0:.2f})".format(reduce_rewards[seq_len + depth_indicator - 1],
-                                                              self.EMOJI_REWARD)
-                            log_str += " [*input*: {0}, *output*: {1}]".format(
-                                decoder_inputs[seq_len + depth_indicator - 1],
-                                decoder_outputs[seq_len + depth_indicator - 1]
-                            )
-                            log_str += " ({1}{0:.2f})".format(decode_rewards[decode_indicator],
-                                                              self.EMOJI_DECODE_REWARD)
-                            decode_indicator += 1
-                        else:
-                            log_str += " ({1}{0:.2f})".format(reduce_rewards[i], self.EMOJI_REWARD)
-                    else:
-                        log_str = no_merge_template.format(merge_candidates[i], layer_merge_prob[i],
-                                                           error_single * depth_indicator)
-                    log_strs.append(log_str)
-                depth_indicator += 1
-        return "\n\n".join(log_strs)
+            resp = self.client.put_log_events(**kwargs)
+            self.sequence_token = resp["nextSequenceToken"]
+        except botocore.exceptions.ClientError as e:
+            # CloudWatch rejected the event; fall back to console so nothing is lost
+            print("CloudWatchLogsHandler error:", e, file=sys.stderr)
 
 
 class AverageMeter:
@@ -157,6 +84,7 @@ class AverageMeter:
         self.count += n
         self.avg = self.sum / self.count
 
+
 class Logger():
     """ Create a logger for training and testing.
     
@@ -166,7 +94,8 @@ class Logger():
     3. File handler: write predictions to a file.
     """
 
-    def __init__(self, log_dir, checkpoint_name):
+    def __init__(self, log_dir: str, checkpoint_name: str,
+                 *, cw_group: str = "thesis-mt-runs") -> None:
         print(f"Creating logger at {log_dir} with name {checkpoint_name}.")
         self.logger = logging.getLogger("general_logger")
         self.logger.setLevel(logging.INFO)
@@ -191,6 +120,28 @@ class Logger():
         # Add handlers to logger
         self.logger.addHandler(ch)
         self.logger.addHandler(fh)
+
+        creds_file = os.path.join(os.getcwd(), "aws.creds")
+
+        if os.path.isfile(creds_file):
+            # Local laptop → use the special credentials file + profile thesis_logger
+            os.environ["AWS_SHARED_CREDENTIALS_FILE"] = creds_file
+            session = boto3.Session(profile_name="thesis_logger")
+        else:
+            # Remote cluster → fall back to ~/.aws credentials, profile default
+            session = boto3.Session(profile_name="default")
+
+        # One stream per run → easy retrieval later
+        cw_stream = f"{checkpoint_name}-{uuid.uuid4().hex[:8]}"
+        cw_handler = CloudWatchLogsHandler(cw_group, cw_stream, session)
+        cw_handler.setLevel(logging.INFO)
+        cw_handler.setFormatter(formatter)
+        self.logger.addHandler(cw_handler)
+
+        # Record where the CloudWatch data lives so you can print / store it
+        self.logger.info(f"CloudWatch stream: {cw_group}/{cw_stream}")
+
+    
         self.logger.info("Logger initialized.")
 
     def info(self, message):

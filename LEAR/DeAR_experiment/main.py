@@ -13,7 +13,6 @@ from tqdm import tqdm
 
 from model import HRLModel, PAD_token, EOS_token
 from utils import AverageMeter
-from utils import VisualizeLogger
 from utils import get_logger
 from utils import Logger
 
@@ -179,8 +178,10 @@ def make_path_preparations(args, run_mode):
 
         if not os.path.exists(args.train_logs_path):
             os.makedirs(args.train_logs_path)
-                    
-        _logger = Logger(args.train_logs_path, args.checkpoint)
+
+        # "thesis-bucket-jcardonaruiz"
+        #print(f"Creating logger at {args.train_logs_path} | checkpoint: {args.checkpoint}")
+        _logger = Logger(args.train_logs_path, args.checkpoint, cw_group = "thesis-train-logs")
         #_logger = get_logger(f"{args.logs_path}.log")
         #print(f"{args.logs_path}.log")
         _logger.info(f"random seed: {seed}")
@@ -188,19 +189,16 @@ def make_path_preparations(args, run_mode):
         if not os.path.exists(args.model_dir):
             os.makedirs(args.model_dir)
         _logger.info(f"checkpoint's dir is: {args.model_dir}")
-        _visualizer = VisualizeLogger(summary_dir=args.model_dir)
     else:
         run_name = args.checkpoint.split('/')[-2]
         checkpoint_name = args.checkpoint.split('/')[-1].replace('.mdl', '')
-        log_dir = args.test_logs_path + run_name + '/'
+        log_dir = args.test_logs_path + run_name
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
         
-        _logger = Logger(log_dir, checkpoint_name)
-
-        _visualizer = None
-
-    return _logger, _visualizer
+        #print(f"Creating logger at {log_dir} | checkpoint: {checkpoint_name}")
+        _logger = Logger(log_dir, checkpoint_name, cw_group = "thesis-test-logs")
+    return _logger
 
 def prepare_optimisers(args, logger, high_parameters, low_parameters):
     if args.high_optimizer == "adam":
@@ -325,7 +323,6 @@ def validate(valid_data, model, epoch, device, logger):
     #     # to accelerate
     #     valid_data = [random.choice(valid_data) for _ in range(1000)]
 
-    visualizer.update_validate_size(len(valid_data))
 
     model.eval()
     start = time.time()
@@ -414,6 +411,8 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
     model.train()
     start = time.time()
 
+    train_data = train_data[0:500]  # for debug
+
     if len(train_data) < 100:
         train_data = [pair for pair in train_data for _ in range(8)]
     elif len(train_data) < 500:
@@ -449,7 +448,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         accuracy_samples = []
         rewards_all = []
 
-        sample_num = 25
+        sample_num = 15
 
         for example_idx in range(batch_size):
             train_pair = train_pairs[example_idx]
@@ -485,7 +484,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         # Stack tensors
         normalized_entropy_samples = torch.cat(normalized_entropy_samples, dim=0)
         accuracy_samples = torch.tensor(accuracy_samples)
-        rewards_all = torch.tensor(rewards_all)
+        rewards_all = torch.tensor(rewards_all, device=device)
         
         semantic_log_probs = torch.cat(semantic_log_probs)
         semantic_entropies = torch.cat(semantic_entropies)
@@ -531,13 +530,20 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         prob_ratio_meter.update((1.0 - loss.detach()).abs().mean().item(), n)
         batch_time_meter.update(time.time() - start)
 
+        del semantic_log_probs, composer_log_probs          # require_grad = True
+        del semantic_entropies, composer_entropies          # still on GPU, large
+        del loss_solver, loss_composer, loss                # keep the graph alive too
+        torch.cuda.empty_cache()        # GPU → really release VRAM (no-op on CPU)
+
+
         global global_step
         global_step += 1
 
-        if batch_num <= 500:
+        if batch_num <= 16:
             val_num = batch_num
         else:
-            val_num = 500
+            val_num = 16
+
 
         print(f"Train: epoch: {epoch + 1} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
         if (batch_idx + 1) % (val_num) == 0:
@@ -766,10 +772,10 @@ def test_model(args, task_name, logger):
         model = model.cuda(args.gpu_id)
 
     checkpoint_file = args.checkpoint
-    print("loading", checkpoint_file)
+    logger.info(f"loading {checkpoint_file}")
     checkpoint = torch.load(checkpoint_file)
     model.load_state_dict(checkpoint["state_dict"])
-    print("loading finished...")
+    logger.info("loading finished...")
     max_length = 'all'
     if max_length == 'all':
         test_data = test_data
@@ -778,20 +784,21 @@ def test_model(args, task_name, logger):
         # test_lesson_idx = -1
         test_data = test_data[:test_lesson_idx]
     random.shuffle(test_data)
+    logger.info("Start testing ..")
     print("Start testing ..")
     log_file = './log/' + re.split(r'/|\.', checkpoint_file)[-3] + "_" + re.split(r'/|\.', checkpoint_file)[-2] + '.txt'
     # pdb.set_trace()
     test_acc, type_right_count = test(test_data, model, example2type, args.gpu_id, log_file)
-    print("Test Acc: {} %".format(test_acc * 100))
+    logger.info("Test Acc: {} %".format(test_acc * 100))
     for type in type_right_count:
         type_acc = sum(type_right_count[type]) / len(type_right_count[type])
-        print(type, 'acc: ', type_acc)
+        logger.info(f"{type} acc: {type_acc}")
 
 
 def prepare_arguments(checkpoint_folder, parser):
     high_lr = 1.0   # 1.0
     low_lr = 0.1     # 0.1
-    accumulate_batch_size = 8
+    accumulate_batch_size = 256
     regular_weight = 1e-1   # 1e-1
     regular_decay_rate = 0.5
     simplicity_reward_rate = 0.5
@@ -879,10 +886,10 @@ if __name__ == "__main__":
     parsed_args = arg_parser.parse_args()
     if parsed_args.mode == 'train':
         args = prepare_arguments(parsed_args.checkpoint, arg_parser)
-        logger, visualizer = make_path_preparations(args, parsed_args.mode)
+        logger = make_path_preparations(args, parsed_args.mode)
         train_model(args, parsed_args.task, logger)
     else:
         args = prepare_arguments(parsed_args.checkpoint, arg_parser)
-        logger, visualizer = make_path_preparations(args, parsed_args.mode)
+        logger = make_path_preparations(args, parsed_args.mode)
         test_model(args, parsed_args.task, logger)
 

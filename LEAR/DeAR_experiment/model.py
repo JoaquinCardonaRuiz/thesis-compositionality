@@ -9,7 +9,6 @@ import copy
 from torch.nn import functional as F
 
 from modules.BinaryTreeBasedModule import BinaryTreeBasedModule
-from modules.MSTDecoder import mst_decode
 
 USE_CUDA = torch.cuda.is_available()
 
@@ -453,11 +452,12 @@ class Solver(nn.Module):
         # calculate the normalized entropy and log probability of the actions taken for RL
         if len(semantic_normalized_entropy) == 0:
             # No stochastic decision was made in this sample
-            normalized_entropy = torch.tensor(0.0, requires_grad=True)
-            semantic_log_prob = torch.tensor(0.0, requires_grad=True)
+            device = idx2contextual[str(head)].device      # ← swap in for x.device
+            normalized_entropy = torch.tensor(0.0, device=device)
+            semantic_log_prob  = torch.tensor(0.0, device=device)
         else:
             normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
-            semantic_log_prob = sum(semantic_log_prob)
+            semantic_log_prob  = sum(semantic_log_prob)
 
         # the final meaning is in the root (the last head idx)
         #assert head == root_idx, f"Error in the tree structure, the root is not the last head idx.\n\n\n {debug_info}"

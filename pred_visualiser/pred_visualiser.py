@@ -3,10 +3,30 @@ import os
 import csv
 import ast
 import re
+import boto3
+import botocore.exceptions
+import threading                         # tiny in-memory cache (optional)
+
 
 app = Flask(__name__)
 
 TSV_DIR = './input_tsvs'
+
+_cache = {
+    "streams": {},
+    "events": {}
+}
+
+def _cw_client():
+    """Return a boto3 CloudWatch Logs client that honours the aws.creds switch."""
+    creds_path = os.path.join(os.getcwd(), "aws.creds")
+    if os.path.isfile(creds_path):                       # ← local laptop
+        os.environ["AWS_SHARED_CREDENTIALS_FILE"] = creds_path
+        sess = boto3.Session(profile_name="thesis_logger")
+    else:                                                # ← remote cluster
+        sess = boto3.Session(profile_name="default")
+    return sess.client("logs")
+
 
 @app.route('/')
 def index():
@@ -62,6 +82,7 @@ def build_tree(row_dict):
 
 @app.route('/api/file/<filename>')
 def load_file(filename):
+    print(f"Loading file: {filename}")
     path = os.path.join(TSV_DIR, filename)
     if not os.path.isfile(path):
         return jsonify({'error': 'File not found'}), 404
@@ -104,6 +125,82 @@ def load_file(filename):
 @app.route('/static/<path:path>')
 def send_static(path):
     return send_from_directory('static', path)
+
+
+@app.route('/api/cw/<path:log_group>/streams')
+def list_log_streams(log_group):
+    """
+    Return every stream in *log_group* (newest first).
+
+    JSON schema:
+        [ { "logStreamName": str,
+            "logStreamDisplayName": str,
+            "logStreamUid": str,
+            "firstEventTimestamp": int,
+            "lastEventTimestamp":  int,
+            "storedBytes": int } , … ]
+    """
+    try:
+        if log_group not in _cache["streams"]:
+            client = _cw_client()
+            paginator = client.get_paginator('describe_log_streams')
+            streams = []
+            for page in paginator.paginate(
+                    logGroupName=log_group,
+                    orderBy='LastEventTime',
+                    descending=True):
+                for stream in page.get('logStreams', []):
+                    full_name = stream.get("logStreamName", "")
+                    if '-' in full_name:
+                        els = full_name.split('-')
+                        uid = els[-1]
+                        display_name = '-'.join(els[:-1])
+                    else:
+                        display_name, uid = full_name, "(no UID)"
+                    stream["logStreamDisplayName"] = display_name
+                    stream["logStreamUid"] = uid
+                    streams.append(stream)
+            _cache["streams"][log_group] = streams  # memoise
+        return jsonify(_cache["streams"][log_group])
+    except botocore.exceptions.ClientError as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/cw/<log_group>/<log_stream>/events')
+def stream_events(log_group, log_stream):
+    """
+    Return *all* events from the given stream as JSON.
+
+    JSON schema:
+        [ { "timestamp": int, "ingestionTime": int, "message": str } , … ]
+    """
+    try:
+        key = (log_group, log_stream)
+        if key not in _cache["events"]:
+            client = _cw_client()
+            events = []
+            next_token = None
+
+            while True:
+                kwargs = {
+                    "logGroupName": log_group,
+                    "logStreamName": log_stream,
+                    "startFromHead": True
+                }
+                if next_token is not None:
+                    kwargs["nextToken"] = next_token
+
+                resp = client.get_log_events(**kwargs)
+                events.extend(resp.get('events', []))
+                if next_token == resp.get('nextForwardToken'):
+                    break
+                next_token = resp.get('nextForwardToken')
+
+            _cache["events"][key] = events
+        return jsonify(_cache["events"][key])
+    except botocore.exceptions.ClientError as e:
+        return jsonify({'error': str(e)}), 400
+
 
 if __name__ == '__main__':
     app.run(debug=True)
