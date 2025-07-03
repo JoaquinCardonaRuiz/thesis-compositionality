@@ -211,13 +211,10 @@ class DepTreeComposer(BinaryTreeBasedModule):
         #printf"stacked_lp: {stacked_lp}")
         #printf"stacked_ne shape: {stacked_ne.shape}")
         #printf"stacked_ne: {stacked_ne}")
-        per_sent_mean = [
-            stacked_ne[:leaf_counts[s]-1, s].mean()
-            for s in range(S)
-        ]
+
         rl_info = {
             "log_prob":           stacked_lp.sum(0),   # (S,)
-            "normalized_entropy": torch.stack(per_sent_mean),
+            "normalized_entropy": stacked_ne.mean(0),  # (S,)
             "reward":             torch.zeros(S, device=device)
         }
         return edges_all, idx2ctx, rl_info
@@ -232,13 +229,8 @@ class DepTreeComposer(BinaryTreeBasedModule):
             logp, entropy         : (S,)      RL scalars
             hidden, cell, mask    : updated tensors (same shapes)
         """
-        
         S, L, D   = hidden.shape
         device    = hidden.device
-
-        node_counts    = mask.sum(dim=1)       # (S,) — how many free nodes each sample has
-        active_samples = node_counts > 1.0     # (S,) bool — still needs ≥1 more merge
-
 
         # 1. Build all head×dep representations in one shot
         h_h = hidden.unsqueeze(2).expand(-1, -1, L, -1)   # (S,L,L,D)
@@ -255,7 +247,6 @@ class DepTreeComposer(BinaryTreeBasedModule):
             h_h.reshape(-1, D), c_h.reshape(-1, D),
             h_d.reshape(-1, D), c_d.reshape(-1, D)
         )
-        
         #printf"new_h shape: {new_h.shape}")
         #printf"new_c shape: {new_c.shape}")
 
@@ -294,13 +285,12 @@ class DepTreeComposer(BinaryTreeBasedModule):
         updates_c = new_c[batch, sel_h, sel_d]   # (S, D)
 
         # clone so we don’t corrupt any autograd metadata on the original tensors
-        hidden_new = hidden.clone()
-        cell_new   = cell.clone()
+        hidden_new = hidden.clone()              # (S, L, D)
+        cell_new   = cell.clone()                # (S, L, D)
 
         # indexed write into the clones
-        act_idx = active_samples.nonzero(as_tuple=True)[0]
-        hidden_new[act_idx, sel_h[act_idx]] = updates_h[act_idx]
-        cell_new  [act_idx, sel_h[act_idx]] = updates_c[act_idx]
+        hidden_new[batch, sel_h] = updates_h     # safe inplace on the clone
+        cell_new  [batch, sel_h] = updates_c
 
         # rebind
         hidden, cell = hidden_new, cell_new

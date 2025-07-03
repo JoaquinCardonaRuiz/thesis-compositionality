@@ -142,7 +142,7 @@
       <div id="logList" class="list-group"></div>
     </div>
     <div id="viewer" class="p-4">
-      <p>This section will display logs in the future.</p>
+      <p>This section will display logs.</p>
     </div>
   </div>
   <div class="modal fade" id="jsonModal" tabindex="-1" aria-labelledby="jsonModalLabel" aria-hidden="true">
@@ -289,29 +289,313 @@
 
     function viewRow(row) {
       try {
-        displaySentence(row.sentence);
+        // clear & set up SVG + zoom container
         d3.select("#treeViz").html("<svg></svg>");
-        const outerSvg = d3.select("svg")
+        const svg = d3.select("#treeViz svg")
           .attr("width", 3000)
-          .attr("height", 800)
-          .call(d3.zoom()
-            .scaleExtent([0.2, 3])
-            .on("zoom", (event) => {
-              g.attr("transform", event.transform);
-            }));
-        const g = outerSvg.append("g").attr("transform", "translate(0,0)");
-        const svg = g
-          .attr("transform", "translate(0,0)");
+          .attr("height", 400)
+          .style("cursor", "grab");
+        
+        // create a <g> that will actually hold all of our trees+tables
+        const zoomG = svg.append("g");
+        
+        // install zoom/pan on the svg, which transforms zoomG
+        svg.call(
+          d3.zoom()
+            .scaleExtent([0.5, 5])
+            .on("start", () => svg.style("cursor", "grabbing"))
+            .on("end",   () => svg.style("cursor", "grab"))
+            .on("zoom",  (event) => zoomG.attr("transform", event.transform))
+        );
+        
         let xoffset = 50;
-        xoffset = renderSpan2TokenTable(row.tree.span2output_token, svg, xoffset);
-        xoffset = renderSyntaxTree(row.tree, svg, xoffset);
-        xoffset = renderSemTree(row.tree, svg, xoffset);
-        xoffset = renderLabelSemTree(row.sem_tree, svg, xoffset);
-        xoffset = renderOutputTable(row.output, row.gold, svg, xoffset);
-        document.getElementById('jsonDisplay').innerHTML = highlightJson(formatJsonCustom(row.full_json));
+        if (row.full_json.pred_edges) {
+          xoffset = renderBottomTable(
+            row.full_json.bottom_idx,
+            row.sentence,
+            zoomG,
+            xoffset
+          );
+        
+          xoffset = renderEdgeGraph(
+            row.full_json.pred_edges,
+            zoomG,
+            xoffset,
+            "Predicted"
+          );
+        
+          xoffset = renderEdgeGraph(
+            row.full_json.gold_edges,
+            zoomG,
+            xoffset,
+            "Gold"
+          );
+        } else {
+          xoffset = renderSpan2TokenTable(row.tree.span2output_token, zoomG, xoffset);
+          xoffset = renderSyntaxTree(row.tree, zoomG, xoffset);
+          xoffset = renderSemTree(row.tree, zoomG, xoffset);
+          xoffset = renderLabelSemTree(row.sem_tree, zoomG, xoffset);
+          xoffset = renderOutputTable(row.output, row.gold, zoomG, xoffset);
+        }
+
+
+        // always dump the JSON
+        document.getElementById("jsonDisplay").innerHTML =
+          highlightJson(formatJsonCustom(row.full_json));
       } catch (e) {
-        document.getElementById('treeViz').textContent = 'Render Error: ' + e;
+        d3.select("#treeViz").text("Render Error: " + e);
       }
+    }
+
+    function renderBottomTable(bottomIdx, sentence, svg, xoffset) {
+      const words = sentence.trim().split(/\s+/);
+      const group = svg.append("g").attr("transform", `translate(${xoffset},280)`);
+      group.append("text")
+          .text("Bottom IDs")
+          .attr("y", -20)
+          .attr("class", "node-label");
+
+      const fo = group.append("foreignObject")
+                      .attr("width", 180)
+                      .attr("height", bottomIdx.length * 25 + 40)
+                      .append("xhtml:div");
+
+      const table = document.createElement("table");
+      table.className = "table table-bordered table-sm";
+      table.style.fontSize = "14px";
+      const tbody = document.createElement("tbody");
+
+      bottomIdx.forEach(idx => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${idx}</td><td>${words[idx]||""}</td>`;
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      fo.each(function() { this.appendChild(table); });
+
+      return xoffset + 200;
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────────
+    // NEW HELPER #2: turn an edge-list into a nested { token, rel, children[] } tree
+    function buildTreeFromEdges(edges) {
+      const nodes = {};
+      edges.forEach(([parent, child, rel]) => {
+        if (!nodes[parent]) nodes[parent] = { token: parent, rel: "", children: [] };
+        if (!nodes[child])  nodes[child]  = { token: child,  rel: rel, children: [] };
+        nodes[parent].children.push(nodes[child]);
+      });
+      // find root = a parent never a child
+      const children = new Set(edges.map(e => e[1]));
+      return edges.reduce((root, [parent]) =>
+        (!children.has(parent) && !root) ? nodes[parent] : root
+      , null) || Object.values(nodes)[0];
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────────
+    // NEW HELPER #3: render a single D3 tree from edges + labels
+    function renderEdgeGraph(edges, svg, xoffset, title) {
+      // Make width proportional to the number of edges (min 300, max 1000)
+      const minWidth = 300, maxWidth = 1000;
+      const width = Math.max(minWidth, Math.min(maxWidth, edges.length * 60));
+      const height = 200;
+      const nodeRadius = 10;
+      const group = svg.append("g")
+                      .attr("transform", `translate(${xoffset}, 80)`);
+
+      // 1) Title
+      group.append("text")
+          .text(title + " Graph")
+          .attr("y", -20)
+          .attr("class", "node-label");
+
+      // 2) Build nodes & links arrays
+      const tokens = Array.from(new Set(edges.flatMap(e => [e[0], e[1]])));
+      const nodes = tokens.map(t => ({ id: t }));
+      // each link carries its relation, and we'll annotate it with index/count
+      const links = edges.map(([source, target, rel]) => ({ source, target, rel }));
+
+      // 3) Group parallel edges (by undirected pair) to compute offsets
+      const groups = {};
+      links.forEach(link => {
+        const key = [link.source, link.target].sort().join("|");
+        groups[key] = groups[key] || [];
+        groups[key].push(link);
+      });
+      Object.values(groups).forEach(group => {
+        group.forEach((link, i) => {
+          link.count = group.length;
+          link.index = i;
+        });
+      });
+
+      // 4) Create a unique arrowhead marker
+      const markerId = `arrowhead-${Math.random().toString(36).slice(2)}`;
+      const defs = group.append("defs");
+      defs.append("marker")
+          .attr("id", markerId)
+          .attr("viewBox", "0 -5 10 10")
+          .attr("refX", 10) // tip of arrow at x=10
+          .attr("refY", 0)
+          .attr("markerUnits", "userSpaceOnUse")
+          .attr("markerWidth", 10)
+          .attr("markerHeight", 10)
+          .attr("orient", "auto")
+        .append("path")
+          .attr("d", "M0,-5L10,0L0,5")
+          .attr("fill", "#999");
+
+      // 5) Simulation
+      const simulation = d3.forceSimulation(nodes)
+        .force("link",  d3.forceLink(links).id(d => d.id).distance(60))
+        .force("charge",d3.forceManyBody().strength(-200))
+        .force("center",d3.forceCenter(width/2, height/2));
+
+      // 6) Draw links (as curved or straight paths)
+      const link = group.append("g")
+          .selectAll("path")
+          .data(links)
+          .enter().append("path")
+            .attr("class", "link")
+            .attr("fill", "none")
+            .attr("stroke", "#999")
+            .attr("stroke-width", 1.5)
+            .attr("marker-end", `url(#${markerId})`);
+
+      // 7) Draw labels for each link
+      const linkLabel = group.append("g")
+          .selectAll("text")
+          .data(links)
+          .enter().append("text")
+            .attr("class", "node-label")
+            .attr("font-size", "10px")
+            .attr("text-anchor", "middle")
+            .text(d => d.rel);
+
+      // 8) Draw nodes
+      const node = group.append("g")
+          .selectAll("g")
+          .data(nodes)
+          .enter().append("g")
+            .call(d3.drag()
+              .on("start", dragstarted)
+              .on("drag",  dragged)
+              .on("end",   dragended));
+
+      node.append("circle")
+          .attr("r", nodeRadius)
+          .attr("fill", "#ccc");
+
+      node.append("text")
+          .attr("class", "node-label")
+          .attr("text-anchor", "middle")
+          .attr("alignment-baseline", "middle")
+          .attr("font-size", "12px")
+          .text(d => d.id);
+
+      // 9) On each tick, position EVERYTHING
+      simulation.on("tick", () => {
+        link.attr("d", d => {
+          // Compute direction vector
+          let sx = d.source.x, sy = d.source.y;
+          let tx = d.target.x, ty = d.target.y;
+          let dx = tx - sx, dy = ty - sy;
+          let dr = Math.hypot(dx, dy);
+
+          // Move start and end points to edge of node circles
+          if (dr > 0) {
+            const ratio = nodeRadius / dr;
+            sx = sx + dx * ratio;
+            sy = sy + dy * ratio;
+            tx = tx - dx * ratio;
+            ty = ty - dy * ratio;
+          }
+
+          // if multiple edges, draw an arc; otherwise straight line
+          if (d.count > 1) {
+            // arc radius grows with index
+            const offset = 20 + d.index * 10;
+            // sweep flag alternates for each parallel edge
+            const sweep = d.index % 2;
+            return `M${sx},${sy}A${dr + offset},${dr + offset} 0 0,${sweep} ${tx},${ty}`;
+          } else {
+            return `M${sx},${sy}L${tx},${ty}`;
+          }
+        });
+
+        // Position link labels mid-arc or mid-line, offset so they don't collide
+        linkLabel.attr("x", d => {
+          let sx = d.source.x, sy = d.source.y;
+          let tx = d.target.x, ty = d.target.y;
+          let dx = tx - sx, dy = ty - sy;
+          let dr = Math.hypot(dx, dy);
+
+          // Move start and end points to edge of node circles
+          if (dr > 0) {
+            const ratio = nodeRadius / dr;
+            sx = sx + dx * ratio;
+            sy = sy + dy * ratio;
+            tx = tx - dx * ratio;
+            ty = ty - dy * ratio;
+          }
+
+          const mx = (sx + tx) / 2;
+          const my = (sy + ty) / 2;
+          if (d.count > 1) {
+            // normal vector for offset
+            const ndx = -(ty - sy), ndy = tx - sx;
+            const len = Math.hypot(ndx, ndy);
+            const sign = d.index % 2 ? 1 : -1;
+            const factor = 10 + d.index * 5;
+            return mx + (ndx/len)*factor*sign;
+          }
+          return mx;
+        })
+        .attr("y", d => {
+          let sx = d.source.x, sy = d.source.y;
+          let tx = d.target.x, ty = d.target.y;
+          let dx = tx - sx, dy = ty - sy;
+          let dr = Math.hypot(dx, dy);
+
+          // Move start and end points to edge of node circles
+          if (dr > 0) {
+            const ratio = nodeRadius / dr;
+            sx = sx + dx * ratio;
+            sy = sy + dy * ratio;
+            tx = tx - dx * ratio;
+            ty = ty - dy * ratio;
+          }
+
+          const mx = (sx + tx) / 2;
+          const my = (sy + ty) / 2;
+          if (d.count > 1) {
+            const ndx = -(ty - sy), ndy = tx - sx;
+            const len = Math.hypot(ndx, ndy);
+            const sign = d.index % 2 ? 1 : -1;
+            const factor = 10 + d.index * 5;
+            return my + (ndy/len)*factor*sign;
+          }
+          return my - 5;  // slightly above straight links
+        });
+
+        // Position nodes
+        node.attr("transform", d => `translate(${d.x},${d.y})`);
+      });
+
+      // 10) Drag handlers
+      function dragstarted(event, d) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x; d.fy = d.y;
+      }
+      function dragged(event, d) {
+        d.fx = event.x; d.fy = event.y;
+      }
+      function dragended(event, d) {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null; d.fy = null;
+      }
+
+      return xoffset + width + 50;
     }
 
     function displaySentence(sentence) {
@@ -375,6 +659,8 @@
     document.getElementById('catSelect').addEventListener('change', updateRowList);
 
     async function fetchLogStreamEvents(logGroup, logStream) {
+      const viewer = document.querySelector('#logsScreen #viewer');
+      viewer.innerHTML = `<div>Loading log events for ${logStream}...</div>`;
       try {
         const res = await fetch(`/api/cw/${logGroup}/${logStream}/events`);
         const events = await res.json();

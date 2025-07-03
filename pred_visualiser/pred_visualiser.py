@@ -94,19 +94,34 @@ def load_file(filename):
             try:
                 cleaned = clean_model_objects(row[0])
                 parsed_row = ast.literal_eval(cleaned)
-                tree = build_tree(parsed_row)
-                tree["span2output_token"] = parsed_row.get("span2output_token", [])
-                response.append({
+                # Base response fields
+                rec = {
                     "sentence": parsed_row.get("pair", [""])[0],
-                    "gold": parsed_row.get("pair", [""])[1],
-                    "correct": parsed_row.get("pred_chain") == parsed_row.get("label_chain"),
-                    "tree": tree,
-                    "sem_tree": parsed_row.get("parent_json"),
                     "category": parsed_row.get("category"),
-                    "output": parsed_row.get("pred_chain"),
-                    "gold": parsed_row.get("label_chain"),
-                    "full_json": parsed_row,
-                })
+                    "full_json": parsed_row
+                }
+                if "pred_edges" in parsed_row:
+                    # New format: front-end will draw edges directly
+                    rec.update({
+                        "gold": parsed_row.get("pair", ["", ""])[1],
+                        "correct": parsed_row.get("comp reward", 0.0) == 1.0,
+                        # leave these empty so old renderers won’t run
+                        "tree": {},
+                        "sem_tree": {},
+                    })
+                else:
+                    # Old format: build span-trees as before
+                    tree = build_tree(parsed_row)
+                    tree["span2output_token"] = parsed_row.get("span2output_token", [])
+                    rec.update({
+                        "gold": parsed_row.get("label_chain"),
+                        "correct": parsed_row.get("pred_chain") == parsed_row.get("label_chain"),
+                        "tree": tree,
+                        "sem_tree": parsed_row.get("parent_json"),
+                        "output": parsed_row.get("pred_chain"),
+                    })
+                response.append(rec)
+
             except Exception as e:
                 response.append({
                     "sentence": "<Parse Error>",
@@ -168,36 +183,27 @@ def list_log_streams(log_group):
 
 @app.route('/api/cw/<log_group>/<log_stream>/events')
 def stream_events(log_group, log_stream):
-    """
-    Return *all* events from the given stream as JSON.
-
-    JSON schema:
-        [ { "timestamp": int, "ingestionTime": int, "message": str } , … ]
-    """
     try:
-        key = (log_group, log_stream)
-        if key not in _cache["events"]:
-            client = _cw_client()
-            events = []
-            next_token = None
+        client = _cw_client()
+        events = []
+        next_token = None
 
-            while True:
-                kwargs = {
-                    "logGroupName": log_group,
-                    "logStreamName": log_stream,
-                    "startFromHead": True
-                }
-                if next_token is not None:
-                    kwargs["nextToken"] = next_token
+        while True:
+            kwargs = {
+                "logGroupName": log_group,
+                "logStreamName": log_stream,
+                "startFromHead": True
+            }
+            if next_token is not None:
+                kwargs["nextToken"] = next_token
 
-                resp = client.get_log_events(**kwargs)
-                events.extend(resp.get('events', []))
-                if next_token == resp.get('nextForwardToken'):
-                    break
-                next_token = resp.get('nextForwardToken')
+            resp = client.get_log_events(**kwargs)
+            events.extend(resp.get('events', []))
+            if next_token == resp.get('nextForwardToken'):
+                break
+            next_token = resp.get('nextForwardToken')
 
-            _cache["events"][key] = events
-        return jsonify(_cache["events"][key])
+        return jsonify(events)
     except botocore.exceptions.ClientError as e:
         return jsonify({'error': str(e)}), 400
 

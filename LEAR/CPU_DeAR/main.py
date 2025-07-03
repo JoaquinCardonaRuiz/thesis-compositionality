@@ -13,7 +13,6 @@ from tqdm import tqdm
 
 from model import HRLModel, PAD_token, EOS_token
 from utils import AverageMeter
-from utils import VisualizeLogger
 from utils import get_logger
 from utils import Logger
 
@@ -22,7 +21,7 @@ import json
 
 import pdb
 
-USE_CUDA = torch.cuda.is_available()
+USE_CUDA = False
 global_step = 0
 
 
@@ -179,8 +178,10 @@ def make_path_preparations(args, run_mode):
 
         if not os.path.exists(args.train_logs_path):
             os.makedirs(args.train_logs_path)
-                    
-        _logger = Logger(args.train_logs_path, args.checkpoint)
+
+        # "thesis-bucket-jcardonaruiz"
+        #print(f"Creating logger at {args.train_logs_path} | checkpoint: {args.checkpoint}")
+        _logger = Logger(args.train_logs_path, args.checkpoint, cw_group = "thesis-train-logs")
         #_logger = get_logger(f"{args.logs_path}.log")
         #print(f"{args.logs_path}.log")
         _logger.info(f"random seed: {seed}")
@@ -188,19 +189,16 @@ def make_path_preparations(args, run_mode):
         if not os.path.exists(args.model_dir):
             os.makedirs(args.model_dir)
         _logger.info(f"checkpoint's dir is: {args.model_dir}")
-        _visualizer = VisualizeLogger(summary_dir=args.model_dir)
     else:
         run_name = args.checkpoint.split('/')[-2]
         checkpoint_name = args.checkpoint.split('/')[-1].replace('.mdl', '')
-        log_dir = args.test_logs_path + run_name + '/'
+        log_dir = args.test_logs_path + run_name
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
         
-        _logger = Logger(log_dir, checkpoint_name)
-
-        _visualizer = None
-
-    return _logger, _visualizer
+        #print(f"Creating logger at {log_dir} | checkpoint: {checkpoint_name}")
+        _logger = Logger(log_dir, checkpoint_name, cw_group = "thesis-test-logs")
+    return _logger
 
 def prepare_optimisers(args, logger, high_parameters, low_parameters):
     if args.high_optimizer == "adam":
@@ -264,7 +262,7 @@ def test(test_data, model, example2type, device, log_file=None):
             # test_data_example[0] = 'a girl on the table helped emma'
             # pdb.set_trace()
             try:
-                tokens_list = [indexes_from_sentence(input_lang, test_data_example[0], 'input')]
+                tokens_list = indexes_from_sentence(input_lang, test_data_example[0], 'input')
             except:
                 continue
             tokens = Variable(torch.LongTensor(tokens_list))
@@ -274,10 +272,10 @@ def test(test_data, model, example2type, device, log_file=None):
             batch_forward_info, pred_chain, label_chain, state = model(test_data_example, tokens, 1, is_test=True)
 
             # pdb.set_trace()
-            normalized_entropy, log_prob, reward = batch_forward_info[0]
+            composer_rl_info, solver_rl_info = batch_forward_info[0]
 
-            normalized_entropy = normalized_entropy.mean()
-            accuracy = [1. if (reward == 1) else 0.]
+            normalized_entropy = composer_rl_info['normalized_entropy'].mean() + solver_rl_info['normalized_entropy'].mean()
+            accuracy = [1. if (composer_rl_info['reward'] == 1 and solver_rl_info['reward'] == 1) else 0.]
             # pdb.set_trace()
             accuracy = torch.tensor(accuracy).mean()
 
@@ -325,7 +323,6 @@ def validate(valid_data, model, epoch, device, logger):
     #     # to accelerate
     #     valid_data = [random.choice(valid_data) for _ in range(1000)]
 
-    visualizer.update_validate_size(len(valid_data))
 
     model.eval()
     start = time.time()
@@ -337,7 +334,7 @@ def validate(valid_data, model, epoch, device, logger):
         for idx, valid_data_example in enumerate(valid_data):
             # print(idx)
             try:
-                tokens_list = [indexes_from_sentence(input_lang, valid_data_example[0], 'input')]
+                tokens_list = indexes_from_sentence(input_lang, valid_data_example[0], 'input')
             except:
                 skip_count += 1
                 continue
@@ -348,7 +345,7 @@ def validate(valid_data, model, epoch, device, logger):
             # print('--' * 20)
             # print(valid_data_example[0])
             batch_forward_info, pred_chain, label_chain, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
-            normalized_entropy, log_prob, reward = batch_forward_info[0]
+            composer_rl_info, solver_rl_info = batch_forward_info[0]
 
             """
             logging into visualizer
@@ -360,8 +357,8 @@ def validate(valid_data, model, epoch, device, logger):
             # visualizer.log_text(valid_data_example[1], tree, pred_labels, seq, debug_info)
             # visualizer.update_step()
 
-            normalized_entropy = normalized_entropy.mean()
-            accuracy = [1. if (reward == 1) else 0.]
+            normalized_entropy = composer_rl_info['normalized_entropy'].mean() + solver_rl_info['normalized_entropy'].mean() 
+            accuracy = [1. if (composer_rl_info['reward'] == 1 and solver_rl_info['reward'] == 1) else 0.]
             accuracy = torch.tensor(accuracy).mean()
 
             # if accuracy == 1:
@@ -373,7 +370,7 @@ def validate(valid_data, model, epoch, device, logger):
             #         f.write(valid_data_example[0] + '\n')
             #         f.write(valid_data_example[1] + '\n\n')
 
-            ce_loss = accuracy
+            ce_loss = torch.tensor([(composer_rl_info['reward']/2 + solver_rl_info['reward'])/2]).mean()
             n = 1
             accuracy_meter.update(accuracy.item(), n)
             ce_loss_meter.update(ce_loss.item(), n)
@@ -388,7 +385,7 @@ def validate(valid_data, model, epoch, device, logger):
     # visualizer.log_performance(accuracy_meter.avg)
     # visualizer.update_epoch()
 
-    logger.info(f"Valid: epoch: {epoch} ce_loss: {ce_loss_meter.avg:.4f} accuracy: {accuracy_meter.avg:.4f} "
+    logger.info(f"Valid: epoch: {epoch+1} ce_loss: {ce_loss_meter.avg:.4f} accuracy: {accuracy_meter.avg:.4f} "
                 f"n_entropy: {n_entropy_meter.avg:.4f} "
                 f"loading_time: {loading_time_meter.avg:.4f} batch_time: {batch_time_meter.avg:.4f} "
                 f"skip_count: {skip_count} "
@@ -409,9 +406,13 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
     prob_ratio_meter = AverageMeter()
     reward_std_meter = AverageMeter()
 
-    device = args.gpu_id
+    #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cpu')  # Force to use CPU for debugging
+
     model.train()
     start = time.time()
+
+    #train_data = train_data[0:500]  # for debug
 
     if len(train_data) < 100:
         train_data = [pair for pair in train_data for _ in range(8)]
@@ -428,6 +429,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
 
     val_accuracy = 0.
     for batch_idx in range(batch_num):
+        
         if (batch_idx + 1) * batch_size < len(train_data):
             train_pairs = train_data[batch_idx * batch_size:(batch_idx + 1) * batch_size]
         else:
@@ -438,14 +440,17 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
 
         loading_time_meter.update(time.time() - start)
 
+        semantic_log_probs = []
+        semantic_entropies = []
+        composer_log_probs = []
+        composer_entropies = []
+        solver_rewards = []
+        composer_rewards = []
         normalized_entropy_samples = []
-        log_prob_samples = []
-        rewards_samples = []
-
         accuracy_samples = []
         rewards_all = []
 
-        sample_num = 25
+        sample_num = 15
 
         for example_idx in range(batch_size):
             train_pair = train_pairs[example_idx]
@@ -453,61 +458,72 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
             # for test
             # train_pair[0] = "emma liked that a girl liked that the cat was rented a cake on a chair on the computer by michael"
             # for test
-
-            tokens_list = [indexes_from_sentence(input_lang, train_pair[0], 'input')]
+            tokens_list = indexes_from_sentence(input_lang, train_pair[0], 'input')
             tokens = Variable(torch.LongTensor(tokens_list))
             # pdb.set_trace()
             if USE_CUDA:
                 tokens = tokens.cuda()
-
             batch_forward_info, pred_chain, label_chain, _ = \
                 model(train_pair, tokens, sample_num, is_test=False, epoch=epoch)
 
             for forward_info in batch_forward_info:
-                normalized_entropy, log_prob, reward = forward_info
+                composer_rl_info, solver_rl_info = forward_info
 
-                accuracy = 1. if (reward == 1) else 0.
-
-                normalized_entropy_samples.append(normalized_entropy)
-                log_prob_samples.append(log_prob)
-                rewards_samples.append(reward)
-
-                rewards_all.append(reward)
+                accuracy = 1. if (composer_rl_info['reward'] == 1 and solver_rl_info['reward'] == 1) else 0.
                 accuracy_samples.append(accuracy)
 
+                semantic_log_probs.append(solver_rl_info["log_prob"])
+                semantic_entropies.append(solver_rl_info["normalized_entropy"])
+                composer_log_probs.append(composer_rl_info["log_prob"])
+                composer_entropies.append(composer_rl_info["normalized_entropy"])
+                solver_rewards.append(torch.tensor([solver_rl_info['reward']], device=device))
+                composer_rewards.append(torch.tensor([composer_rl_info['reward']], device=device))
+
+                normalized_entropy_samples.append(solver_rl_info['normalized_entropy'] + 
+                                                composer_rl_info['normalized_entropy'])
+                rewards_all.append(solver_rl_info['reward'] + composer_rl_info['reward'])
+        
+        # Stack tensors
         normalized_entropy_samples = torch.cat(normalized_entropy_samples, dim=0)
         accuracy_samples = torch.tensor(accuracy_samples)
-        rewards_all = torch.tensor(rewards_all)
-        rewards_samples = torch.tensor(rewards_samples)
+        rewards_all = torch.tensor(rewards_all, device=device)
+        
+        semantic_log_probs = torch.cat(semantic_log_probs)
+        semantic_entropies = torch.cat(semantic_entropies)
+        composer_log_probs = torch.cat(composer_log_probs)
+        composer_entropies = torch.cat(composer_entropies)
+        solver_rewards = torch.cat(solver_rewards)
+        composer_rewards = torch.cat(composer_rewards)
 
-        if USE_CUDA:
-            accuracy_samples = accuracy_samples.cuda()
-            rewards_all = rewards_all.cuda()
-            rewards_samples = rewards_samples.cuda()
+        # Optionally normalize (baseline)
+        solver_advantage = solver_rewards - solver_rewards.mean()
+        composer_advantage = composer_rewards - composer_rewards.mean()
 
-        baseline = rewards_all.mean()
-        accuracy = accuracy_samples.mean()
+        # ── compute the two losses exactly as before ──
+        loss_solver   = -(solver_advantage.detach()   * semantic_log_probs).mean()
+        loss_composer = -(composer_advantage.detach() * composer_log_probs).mean()
 
-        if baseline:
-            rewards_samples = rewards_samples - baseline
-        # pdb.set_trace()
-        log_prob_samples = torch.cat(log_prob_samples, dim=0)
+        # ── clear all grads first ──
+        optimizer["high"].zero_grad()
+        optimizer["low"].zero_grad()
 
-        prob_ratio = (log_prob_samples - log_prob_samples.detach()).exp()
-        # prob_ratio = log_prob_samples
-        loss = (prob_ratio * rewards_samples).mean()
-        # pdb.set_trace()
+        # ── backward passes ──
+        loss_composer.backward(retain_graph=True)   # high-level grads
+        loss_solver.backward()                      # low-level  grads
 
-        loss = loss - regular_weight * normalized_entropy_samples.mean()
-
-        loss.backward()
+        # ── now step each optimiser ──
         perform_high_optimizer_step(optimizer, model, args)
         perform_low_optimizer_step(optimizer, model, args)
 
+        # (optional) log a joint loss value for monitoring
+        loss = (loss_solver + loss_composer) / 2
+
+        
         normalized_entropy = normalized_entropy_samples.mean()
         n = batch_size * sample_num
 
         ce_loss = rewards_all.mean()
+        accuracy = accuracy_samples.mean()
         accuracy_meter.update(accuracy.item(), n)
         ce_loss_meter.update(ce_loss.item(), n)
         reward_std_meter.update(rewards_all.std().item(), n)
@@ -516,20 +532,28 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         prob_ratio_meter.update((1.0 - loss.detach()).abs().mean().item(), n)
         batch_time_meter.update(time.time() - start)
 
+        del semantic_log_probs, composer_log_probs          # require_grad = True
+        del semantic_entropies, composer_entropies          # still on GPU, large
+        del loss_solver, loss_composer, loss                # keep the graph alive too
+        torch.cuda.empty_cache()        # GPU → really release VRAM (no-op on CPU)
+
+
         global global_step
         global_step += 1
 
-        if batch_num <= 3000:
+        if batch_num <= 500:
             val_num = batch_num
         else:
-            val_num = 3000
+            val_num = 500
 
-        print(f"Train: epoch: {epoch} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
+
+        print(f"Train: epoch: {epoch + 1} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
         if (batch_idx + 1) % (val_num) == 0:
-            logger.info(f"Train: epoch: {epoch} batch_idx: {batch_idx + 1} ce_loss: {ce_loss_meter.avg:.4f} "
+            logger.info(f"Train: epoch: {epoch + 1} batch_idx: {batch_idx + 1} ce_loss: {ce_loss_meter.avg:.4f} "
                         f"reward_std: {reward_std_meter.avg:.4f} "
                         f"n_entropy: {n_entropy_meter.avg:.4f} loading_time: {loading_time_meter.avg:.4f} "
-                        f"batch_time: {batch_time_meter.avg:.4f}")
+                        f"batch_time: {batch_time_meter.avg:.4f}"
+                        f"est. epoch time: {batch_time_meter.avg * batch_num / 60:.2f} min ")
             logger.info(f"total_batch_num: {total_batch_num} cir: {data_len}")
 
             # print(f"Train: epoch: {epoch} batch_idx: {batch_idx + 1} ce_loss: {ce_loss_meter.avg:.4f} "
@@ -541,9 +565,9 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
             val_accuracy = validate(valid_data, model, epoch, device, logger)
 
             global best_model_path
-            logger.info("saving model...")
-            best_model_path = f"{args.model_dir}/{epoch}-{batch_idx}.mdl"
-            torch.save({"epoch": epoch, "batch_idx": batch_idx, "state_dict": model.state_dict()}, best_model_path)
+            #logger.info("saving model...")
+            #best_model_path = f"{args.model_dir}/{epoch}-{batch_idx}.mdl"
+            #torch.save({"epoch": epoch, "batch_idx": batch_idx, "state_dict": model.state_dict()}, best_model_path)
             model.train()
 
         start = time.time()
@@ -651,7 +675,8 @@ def train_model(args, task_name, logger):
     }
 
     regular_weight = args.regular_weight
-    print('Start lesson ', data_len)
+    logger.info(f"Start lesson {data_len} with batch size {args.accumulate_batch_size}, low_lr {args.low_lr}, high_lr {args.high_lr}, optimisers {args.high_optimizer} and {args.low_optimizer}, l2_weight {args.l2_weight}, regular_weight {regular_weight}, hidden size {args.hidden_dim}")
+
     total_batch_num = 0
     for epoch in range(args.max_epoch):
         logger.info(f"Start epoch {epoch + 1}")
@@ -685,7 +710,7 @@ def train_model(args, task_name, logger):
         logger.info(f"Epoch {epoch + 1} Gen accuracy: {final_gen_acc:.4f}")
 
         logger.info("Saving model...")
-        best_model_path = f"{args.model_dir}/epoch-{epoch}.mdl"
+        best_model_path = f"{args.model_dir}/epoch-{epoch+1}.mdl"
         torch.save({"epoch": epoch, "batch_idx": "final", "state_dict": model.state_dict()}, best_model_path)
 
         if val_accuracy == 1.:
@@ -751,10 +776,10 @@ def test_model(args, task_name, logger):
         model = model.cuda(args.gpu_id)
 
     checkpoint_file = args.checkpoint
-    print("loading", checkpoint_file)
+    logger.info(f"loading {checkpoint_file}")
     checkpoint = torch.load(checkpoint_file)
     model.load_state_dict(checkpoint["state_dict"])
-    print("loading finished...")
+    logger.info("loading finished...")
     max_length = 'all'
     if max_length == 'all':
         test_data = test_data
@@ -763,14 +788,15 @@ def test_model(args, task_name, logger):
         # test_lesson_idx = -1
         test_data = test_data[:test_lesson_idx]
     random.shuffle(test_data)
+    logger.info("Start testing ..")
     print("Start testing ..")
     log_file = './log/' + re.split(r'/|\.', checkpoint_file)[-3] + "_" + re.split(r'/|\.', checkpoint_file)[-2] + '.txt'
     # pdb.set_trace()
     test_acc, type_right_count = test(test_data, model, example2type, args.gpu_id, log_file)
-    print("Test Acc: {} %".format(test_acc * 100))
+    logger.info("Test Acc: {} %".format(test_acc * 100))
     for type in type_right_count:
         type_acc = sum(type_right_count[type]) / len(type_right_count[type])
-        print(type, 'acc: ', type_acc)
+        logger.info(f"{type} acc: {type_acc}")
 
 
 def prepare_arguments(checkpoint_folder, parser):
@@ -789,7 +815,7 @@ def prepare_arguments(checkpoint_folder, parser):
             "composer-trans-hidden": hidden_size,
             "var-normalization": "True",
             "regular-weight": regular_weight,  # 0.0001
-            "clip-grad-norm": 0.5,
+            "clip-grad-norm": 0.3, #CHANGE!!! 
             "env-optimizer": "adadelta",  # adadelta
             "pol-optimizer": "adadelta",  # adadelta
             "high-lr": high_lr,  # 1.
@@ -864,10 +890,10 @@ if __name__ == "__main__":
     parsed_args = arg_parser.parse_args()
     if parsed_args.mode == 'train':
         args = prepare_arguments(parsed_args.checkpoint, arg_parser)
-        logger, visualizer = make_path_preparations(args, parsed_args.mode)
+        logger = make_path_preparations(args, parsed_args.mode)
         train_model(args, parsed_args.task, logger)
     else:
         args = prepare_arguments(parsed_args.checkpoint, arg_parser)
-        logger, visualizer = make_path_preparations(args, parsed_args.mode)
+        logger = make_path_preparations(args, parsed_args.mode)
         test_model(args, parsed_args.task, logger)
 

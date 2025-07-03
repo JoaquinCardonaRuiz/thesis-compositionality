@@ -68,45 +68,37 @@ class BinaryTreeBasedModule(nn.Module):
 
     def _transform_leafs(self, x, mask):
         """
-        x    : (B, T, input_dim)   or   (T, input_dim) for legacy single case
-        mask : (B, T)              1 = keep, 0 = pad
-        returns hidden, cell : (B, T, D)
+        Accepts: x of shape (seq_len, input_dim) or (1, seq_len, input_dim)
+        Returns: hidden and cell states of shape (seq_len, D)
         """
-        # ---- normalise shapes -------------------------------------------
-        if x.dim() == 2:                       # legacy call: one sentence
-            x    = x.unsqueeze(0)              # (1, T, D)
-            mask = mask.unsqueeze(0) if mask.dim() == 1 else mask  # (1, T)
+        # Ensure x has shape (1, seq_len, D)
+        if x.dim() == 2:
+            x = x.unsqueeze(0)  # → (1, seq_len, input_dim)
 
-        assert mask.dim() == 2,  "mask must be (batch, seq_len)"
-
-        # ---- select transformation --------------------------------------
         if self.leaf_transformation == BinaryTreeBasedModule.no_transformation:
             pass
-
         elif self.leaf_transformation == BinaryTreeBasedModule.lstm_transformation:
-            x = self.lstm(x, mask)             # lstm knows batch_first=True
-
+            x = self.lstm(x, mask)
         elif self.leaf_transformation == BinaryTreeBasedModule.bi_lstm_transformation:
             h_f = self.lstm_f(x, mask)
             h_b = self.lstm_b(x, mask, backward=True)
-            x   = torch.cat([h_f, h_b], dim=-1)
-
+            x = torch.cat([h_f, h_b], dim=-1)
         elif self.leaf_transformation == BinaryTreeBasedModule.conv_transformation:
-            x = x.permute(0, 2, 1)             # (B, D, T)
-            x = torch.relu(self.conv1(x))
-            x = torch.tanh(self.conv2(x))
-            x = x.permute(0, 2, 1)             # back to (B, T, D)
+            x = x.permute(0, 2, 1)
+            x = self.conv1(x)
+            x = torch.relu(x)
+            x = self.conv2(x)
+            x = torch.tanh(x)
+            x = x.permute(0, 2, 1)
 
         elif self.leaf_transformation == self.transformer_transformation:
-            # PyTorch MHA expects True = pad
-            key_pad = ~mask.bool()             # (B, T)
+            # PyTorch expects key-padding mask True=pad; our mask is 1=valid
+            key_pad = ~mask.bool().unsqueeze(0)   # (batch, seq_len)
             x = self.transformer(x, src_key_padding_mask=key_pad)
 
-        else:
-            raise ValueError(f"Unknown leaf transformation '{self.leaf_transformation}'")
 
-        h, c = self.linear(x).tanh().chunk(2, -1)
-        return h, c            # keep shape (B, T, D) unconditionally
+        h, c = self.linear(x).tanh().chunk(chunks=2, dim=-1)
+        return h.squeeze(0), c.squeeze(0)  # remove batch dim again
 
     @staticmethod
     def _merge(actions, h_l, c_l, h_r, c_r, h_p, c_p, mask):

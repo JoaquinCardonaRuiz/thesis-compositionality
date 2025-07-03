@@ -347,13 +347,33 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
 
         # —— Composer step —— 
         # temporarily freeze solver weights
-        optimizer['high'].zero_grad()
-        optimizer['low'].zero_grad()
-        loss_composer.backward(retain_graph=True)
-        loss_solver.backward()
-        optimizer['high'].step()
-        optimizer['low'].step()
+        for p in model.get_low_parameters(): p.requires_grad = False
 
+        optimizer["high"].zero_grad()
+        loss_composer.backward(retain_graph=True)
+        if args.clip_grad_norm>0:
+            torch.nn.utils.clip_grad_norm_(model.get_high_parameters(),
+                                        args.clip_grad_norm,
+                                        norm_type=float("inf"))
+        optimizer["high"].step()
+
+        # unfreeze solver
+        for p in model.get_low_parameters(): p.requires_grad = True
+
+        # —— Solver step —— 
+        # temporarily freeze composer weights
+        for p in model.get_high_parameters(): p.requires_grad = False
+
+        optimizer["low"].zero_grad()
+        loss_solver.backward()   # no need for retain_graph now
+        if args.clip_grad_norm>0:
+            torch.nn.utils.clip_grad_norm_(model.get_low_parameters(),
+                                        args.clip_grad_norm,
+                                        norm_type=float("inf"))
+        optimizer["low"].step()
+
+        # unfreeze composer
+        for p in model.get_high_parameters(): p.requires_grad = True
 
 
         total_batch_num += B
@@ -671,9 +691,9 @@ def prepare_arguments(checkpoint_folder: str, parser: argparse.ArgumentParser):
     default_args = dict(
         sample_num         = 15,  # number of Monte-Carlo clones
         batch_size         = 8,
-        high_lr            = 5,
-        low_lr             = 1,
-        clip_grad_norm     = 2,
+        high_lr            = 0.5,
+        low_lr             = 0.05,
+        clip_grad_norm     = 0.5,
         l2_weight          = 1e-5,
         high_optimizer     = "adadelta",
         low_optimizer      = "adadelta",

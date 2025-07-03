@@ -9,6 +9,17 @@ LEAR/DeAR_experiment/slog_data
 LEAR/DeAR_experiment/checkpoint
 LEAR/DeAR_experiment/__pycache__
 LEAR/DeAR_experiment/modules/__pycache__gh_token
+
+LEAR/CPU_DeAR/checkpoint
+LEAR/CPU_DeAR/__pycache__
+LEAR/CPU_DeAR/modules/__pycache__
+LEAR/CPU_DeAR/cogs_data
+LEAR/CPU_DeAR/slog_data
+
+LEAR\Temp
+
+pred_visualiser/input_tsvs
+
 test.py
 test_results.txt
 LEAR/DeAR_experiment/modules/__pycache__/*

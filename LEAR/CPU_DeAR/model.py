@@ -6,7 +6,6 @@ from utils import Categorical
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from utils import clamp_grad
 import copy
-from itertools import chain, repeat
 from torch.nn import functional as F
 
 from modules.BinaryTreeBasedModule import BinaryTreeBasedModule
@@ -23,6 +22,77 @@ x4_token = 6
 
 all_entities = ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]
 available_src_vars = ['x1', 'x2', 'x3', 'x4']
+
+class Node:
+    def __repr__(self,depth=0):
+        s = f"{'\t'*depth}{self.rel} {self.__class__.__name__}({self.token}) - {self.ix}"
+        for child in self.children:
+            s += f"\n{child.__repr__(depth=depth+1)}"
+        return s
+
+    def __str__(self,depth=0):
+        return self.__repr__(depth=depth)
+
+class E(Node):  # Entities (M0~M9)
+    # 0: in
+    # 1: on
+    # 2: beside
+    # 3: relcl
+    def __init__(self, entity, ix=-1):
+        self.children = []
+        self.token = entity
+        self.rel = ''
+        self.ix = ix
+
+    def add_child(self, child, rel):
+        assert rel in ['in', 'on', 'beside', 'relcl']
+        if rel == 'relcl':
+            assert isinstance(child, P)
+        else:
+            assert isinstance(child, E)
+
+        child_aux = copy.deepcopy(child)
+        child_aux.rel = rel
+        self.children.append(child_aux)
+
+
+
+
+class P(Node):
+    def __init__(self, action, ix=-1):
+        self.children = []
+        self.token = action
+        self.rel = ''
+        self.ix = ix
+
+        self.has_role = {"agent": False, "theme": False, "recipient": False}
+
+        self.is_causative = False
+        self.is_unaccusative = False
+
+        self.is_full = False
+
+
+    def add_child(self, child, rel):
+        assert rel in ['ccomp', 'xcomp', 'agent', 'theme', 'recipient']
+        if rel == 'ccomp' or rel == 'xcomp':
+            assert isinstance(child, P)
+        else:
+            assert isinstance(child, E)
+            if rel == 'agent':
+                self.has_role['agent'] = True
+            elif rel == 'theme':
+                self.has_role['theme'] = True
+            elif rel == 'recipient':
+                self.has_role['recipient'] = True
+            if self.has_role['agent'] and \
+                    self.has_role['theme'] and \
+                    self.has_role['recipient']:
+                self.is_full = True
+
+        child_aux = copy.deepcopy(child)
+        child_aux.rel = rel
+        self.children.append(child_aux)
 
 
 class BottomAbstrator(nn.Module):
@@ -89,227 +159,143 @@ class DepTreeComposer(BinaryTreeBasedModule):
                 nn.init.constant_(layer.bias, 0.0)
 
 
-    def batch_forward(self, x_emb, bottom_all, word_mask):
+
+    def forward(self, x_embedding, bottom_idx):
+        """ Forward pass of the DepTreeComposer.
+
+        Builds a dependency tree from the input sequence x, which is a sequence of token embeddings.
         """
-        x_emb      : (S, L_max, D)   — mega-batch (B×N sentences)
-        bottom_all : (S, B_max) int  — bottom indices padded with −1
-        word_mask  : (S, L_max) float — 1 for real tokens
-        """
-        S, L_max, D = x_emb.shape
-        #printf"S: {S}, L_max: {L_max}, D: {D}")
-        device      = x_emb.device
+        # debug prints
+        #print(f"Bottom indices: {bottom_idx}")
 
-        # 1) Leaf encoding (unchanged)
-        mask_leaf   = bottom_all >= 0                            # (S, B_max)
-        #printf"mask_leaf shape: {mask_leaf.shape}")
-        #printf"mask_leaf: {mask_leaf}")
-        leaf_pos   = bottom_all.clone()
-        leaf_pos[~mask_leaf] = 0
-        #printf"leaf_pos shape: {leaf_pos.shape}")
-        #printf"leaf_pos: {leaf_pos}")
-        max_B       = mask_leaf.sum(dim=1).max().item()          # largest #leaves in batch
-        #printf"max_B: {max_B}")
+        # Define edges and rl info
+        log_probs = []
+        entropies = []
+        edges = []
 
-        # get full leaf states
-        h_all, c_all = self._transform_leafs(x_emb, word_mask)   # (S, L_max, D)
-        #printf"h_all shape: {h_all.shape}")
-        #printf"c_all shape: {c_all.shape}")
+        B = len(bottom_idx)
+        #print(f"Batch size: {B}")
+        mask = torch.ones((x_embedding.size(0),), dtype=torch.float32, device=x_embedding.device)
+        #print(f"Mask: {mask}")
 
-        # gather out only the "bottom" positions into B_max slots
-        h0 = h_all.gather(1, leaf_pos.unsqueeze(-1).expand(-1,-1,D))
-        c0 = c_all.gather(1, leaf_pos.unsqueeze(-1).expand(-1,-1,D))
-        #printf"h0 shape: {h0.shape}")
-        #printf"c0 shape: {c0.shape}")
+        
+        if USE_CUDA:
+            mask = mask.cuda()
 
-        # zero out padded leaves
-        h0 = h0.masked_fill(~mask_leaf.unsqueeze(-1), 0.0)
-        c0 = c0.masked_fill(~mask_leaf.unsqueeze(-1), 0.0)
-        #printf"h0 after masking shape: {h0.shape}")
-        #printf"c0 after masking shape: {c0.shape}")
+        # next, we get the leaf embeddings of the input sequence (all tokens)
+        # this will be a hidden state and a cell state for each token in the input sequence
+        hidden_1, cell_1 = self._transform_leafs(x_embedding, mask)
+        hidden = hidden_1[bottom_idx]  # (B, D)
+        cell = cell_1[bottom_idx]  # (B, D)
+        mask = mask[bottom_idx]
 
-        # init working tensors
-        hidden      = h0.clone()                                 # (S, B_max, D)
-        cell        = c0.clone()
-        mask        = mask_leaf.float()                          # (S, B_max)
-        idx_lookup  = bottom_all.clone()                         # (S, B_max)
-
-        # bookkeeping
-        log_p       = []
-        ent         = []
-        edges_all   = [[] for _ in range(S)]
-        idx2ctx     = [ {} for _ in range(S) ]
-
-        # pre-fill idx2ctx with initial leaf contexts
-        for s in range(S):
-            for j in range(mask_leaf.size(1)):
-                tok = idx_lookup[s, j].item()
-                if tok >= 0:
-                    idx2ctx[s][str(tok)] = hidden[s, j].clone()
-        #printf"each idx2ctx[s] has {len(idx2ctx[0])} entries")
-
-
-        # --- NEW: per-sample merge loop --------------------------------
-        # how many merges each sample needs = (#leaves - 1)
-        leaf_counts   = mask_leaf.sum(dim=1).to(torch.int64)    # (S,)
-        #printf"leaf_counts shape: {leaf_counts.shape}")
-        merge_counts  = torch.zeros_like(leaf_counts)           # (S,)
-        #printf"merge_counts shape: {merge_counts.shape}")
-        active        = merge_counts < (leaf_counts - 1)        # (S,) bool
-        #printf"active shape: {active.shape}")
-
-        active_masks = []
-        while active.any():
-            active_masks.append(active.clone())
-            # one batch step
-            sel_h, sel_d, lp_batch, ne_batch, hidden, cell, mask = \
-                self._make_step_batch(hidden, cell, mask)
-            #printf"sel_h shape: {sel_h.shape}, sel_d shape: {sel_d.shape}")
-            #printf"lp_batch shape: {lp_batch.shape}, ne_batch shape: {ne_batch.shape}")
-            
-            # collect only for still-active samples
-            log_p.append(lp_batch[active])
-            ent.append(ne_batch[active])
-            #printf"log_p: {log_p[-1]}")
-            #printf"ent: {ent[-1]}")
-
-            # update per-sample books
-            #printf"active nonzero: {active.nonzero(as_tuple=True)}")
-            for s in active.nonzero(as_tuple=True)[0].tolist():
-                #printf"Processing sample {s} with sel_h: {sel_h[s]}, sel_d: {sel_d[s]}")
-                h_j = sel_h[s].item()
-                #printf"h_j: {h_j}")
-                d_j = sel_d[s].item()
-                #printf"d_j: {d_j}")
-                h_tok = idx_lookup[s, h_j].item()
-                #printf"h_tok: {h_tok}")
-                d_tok = idx_lookup[s, d_j].item()
-                #printf"d_tok: {d_tok}")
-                # only if both are real leaves
-                if h_tok >= 0 and d_tok >= 0:
-                    edges_all[s].append((h_tok, d_tok))
-                    #printf"Appending edge ({h_tok}, {d_tok}) to edges_all[{s}]")
-                    idx2ctx[s][str(h_tok)] = hidden[s, h_j].clone()
-                    #printf"Updating idx2ctx[{s}][{h_tok}] with hidden[{s}, {h_j}]")
-                # mark that position as merged
-                idx_lookup[s, d_j] = -1
-                merge_counts[s]    += 1
-                #printf"Updated idx_lookup[{s}, {d_j}] to -1 and incremented merge_counts[{s}] to {merge_counts[s]}")
-            # recompute who still needs more merges
-            active = merge_counts < (leaf_counts - 1)
-
-        # 3) package RL info back into per-sample tensors
-        total_steps = len(log_p)
-        stacked_lp = torch.zeros(total_steps, S, device=device)
-        stacked_ne = torch.zeros_like(stacked_lp)
-
-        for t, (lp_t, ne_t, m) in enumerate(zip(log_p, ent, active_masks)):
-            # m is the Boolean mask that was stored just before _make_step_batch
-            stacked_lp[t, m] = lp_t           # (len(lp_t) == m.sum())
-            stacked_ne[t, m] = ne_t
-
-        #printf"stacked_lp shape: {stacked_lp.shape}")
-        #printf"stacked_lp: {stacked_lp}")
-        #printf"stacked_ne shape: {stacked_ne.shape}")
-        #printf"stacked_ne: {stacked_ne}")
-        per_sent_mean = [
-            stacked_ne[:leaf_counts[s]-1, s].mean()
-            for s in range(S)
-        ]
-        rl_info = {
-            "log_prob":           stacked_lp.sum(0),   # (S,)
-            "normalized_entropy": torch.stack(per_sent_mean),
-            "reward":             torch.zeros(S, device=device)
+        # Initial contextual embeddings
+        idx2contextual = {
+            str(bottom_idx[i]): hidden[i] for i in range(B)
         }
-        return edges_all, idx2ctx, rl_info
-
-
-    def _make_step_batch(self, hidden, cell, mask):
-        """
-        hidden, cell : (S, L_max, D)
-        mask         : (S, L_max)   1 = node still unattached
-        returns:
-            sel_h, sel_d          : (S,)      int32 head / dep indices
-            logp, entropy         : (S,)      RL scalars
-            hidden, cell, mask    : updated tensors (same shapes)
-        """
         
-        S, L, D   = hidden.shape
-        device    = hidden.device
+        # debug prints
+        #print(f"Initial hidden state: {hidden.size()}, cell state: {cell.size()}")
 
-        node_counts    = mask.sum(dim=1)       # (S,) — how many free nodes each sample has
-        active_samples = node_counts > 1.0     # (S,) bool — still needs ≥1 more merge
+        edges = []
+        while len(edges) < len(bottom_idx) - 1: 
 
+            cat_distr, _, actions, hidden, cell = self._make_step(hidden, cell, mask)
+            
+            actions_idx_tensor = actions.argmax()
+            actions_idx = actions_idx_tensor.item()
+            B = hidden.size(0)
+            head_idx, dep_idx = divmod(actions_idx, B)
 
-        # 1. Build all head×dep representations in one shot
-        h_h = hidden.unsqueeze(2).expand(-1, -1, L, -1)   # (S,L,L,D)
-        h_d = hidden.unsqueeze(1).expand(-1, L, -1, -1)
-        c_h = cell  .unsqueeze(2).expand_as(h_h)
-        c_d = cell  .unsqueeze(1).expand_as(c_h)
-        #printf"h_h shape: {h_h.shape}")
-        #printf"h_d shape: {h_d.shape}")
-        #printf"c_h shape: {c_h.shape}")
-        #printf"c_d shape: {c_d.shape}")
+            # Update contextual representation for the dependent
+            idx2contextual[str(bottom_idx[head_idx])] = hidden[head_idx]
 
+            log_probs.append(cat_distr.log_prob(actions_idx_tensor))
+            entropies.append(cat_distr.entropy)
 
-        new_h, new_c = self.tree_lstm_cell(                      # (S,L,L,D)
-            h_h.reshape(-1, D), c_h.reshape(-1, D),
-            h_d.reshape(-1, D), c_d.reshape(-1, D)
+            edges.append((bottom_idx[head_idx], bottom_idx[dep_idx]))
+            mask[dep_idx] = 0  # Mark dep as attached
+            # debug prints
+            #print(f"Current edges: {edges}")
+            #print(f"Action taken: {actions_idx} (head: {head_idx}, dep: {dep_idx})")
+            #print(f"Updated mask: {mask}")
+
+        # Package outputs
+        rl_info = {
+            "normalized_entropy": torch.stack(entropies).mean().unsqueeze(0),
+            "log_prob": torch.stack(log_probs).sum().unsqueeze(0)
+        }
+
+        # debug prints
+        #print(f"Edges: {edges}")
+        #print(f"RL Info: {rl_info}")
+
+        return edges, idx2contextual, rl_info
+    
+    def _make_step(self, hidden, cell, mask_ori):
+        """
+        One REINFORCE step: score all (head, dep) pairs and update selected head.
+        
+        Args:
+            hidden: (B, D)
+            cell: (B, D)
+            mask_ori: (B,) float — 1 if dep is unassigned
+
+        Returns:
+            cat_distr: Categorical distribution over valid arcs
+            gumbel_noise: Updated noise (if used)
+            actions: One-hot vector over (B*B)
+            hidden: (B, D) updated hidden states
+            cell: (B, D) updated cell states
+        """
+        B, D = hidden.size()
+        device = hidden.device
+        mask = copy.deepcopy(mask_ori)
+
+        # Build head × dep matrices
+        head_h = hidden.unsqueeze(1).expand(B, B, D)  # (B, B, D)
+        head_c = cell.unsqueeze(1).expand(B, B, D)
+        dep_h = hidden.unsqueeze(0).expand(B, B, D)
+        dep_c = cell.unsqueeze(0).expand(B, B, D)
+
+        # Compose new head representations based on head←dep
+        new_h, new_c = self.tree_lstm_cell(
+            head_h.reshape(-1, D),
+            head_c.reshape(-1, D),
+            dep_h.reshape(-1, D),
+            dep_c.reshape(-1, D)
         )
-        
-        #printf"new_h shape: {new_h.shape}")
-        #printf"new_c shape: {new_c.shape}")
+        new_h = new_h.view(B, B, D)
+        new_c = new_c.view(B, B, D)
 
-        new_h = new_h.view(S, L, L, D)
-        new_c = new_c.view_as(new_h)
-        #printf"new_h after view shape: {new_h.shape}")
-        #printf"new_c after view shape: {new_c.shape}")
+        # Score all head→dep arcs
+        arc_features = torch.cat([head_h, dep_h], dim=-1)  # (B, B, 2D)
+        score = self.arc_scorer(arc_features).squeeze(-1)  # (B, B)
 
-        # 2. score every arc once
-        arc_feat = torch.cat([h_h, h_d], dim=-1)                 # (S,L,L,2D)
-        score    = self.arc_scorer(arc_feat).squeeze(-1)         # (S,L,L)
-        #printf"arc_feat shape: {arc_feat.shape}")
-        #printf"score shape: {score.shape}")
-        
+        # Mask invalid arcs: prevent attaching to already attached deps
+        arc_mask = torch.ones_like(score, dtype=torch.float32, device=device)
+        arc_mask.fill_diagonal_(0)  # no self-loops
+        arc_mask *= mask.unsqueeze(0)  # block already-attached deps (on dep axis)
 
-        # 3. mask: no self-loop; dep must still be free
-        dep_free   = mask.bool().unsqueeze(1)
-        arc_mask   = torch.ones_like(score)
-        arc_mask   *= dep_free
-        arc_mask.diagonal(dim1=1, dim2=2).fill_(0)
-        score_masked = score.masked_fill(arc_mask == 0, torch.finfo(score.dtype).min)
-        flat_mask   = arc_mask.view(S, -1).float()
-        flat_score = score_masked.view(S, -1)
+        # Flatten scores and masks for categorical sampling
+        flat_score = score.view(-1)
+        flat_mask = arc_mask.view(-1)
 
+        # Sample from categorical distribution over valid arcs
+        cat_distr = Categorical(flat_score, flat_mask)
+        actions, gumbel_noise = self._sample_action(cat_distr, flat_mask)
+        actions_2d = actions.view(B, B)  # (B, B)
 
-        flat_score = torch.nan_to_num(flat_score, nan=0.0, posinf=50.0, neginf=-50.0)
-        cat = Categorical(flat_score, flat_mask)                 # utils.Categorical
-        actions, _ = self._sample_action(cat, flat_mask)         # (S,L²) one-hot
-        sel_idx    = actions.argmax(dim=-1)                      # (S,) 0…L²−1
-        sel_h, sel_d = torch.div(sel_idx, L, rounding_mode='floor'), sel_idx % L
+        # Select updated representations for heads
+        new_h_updated = (actions_2d.unsqueeze(-1) * new_h).sum(dim=1)  # (B, D)
+        new_c_updated = (actions_2d.unsqueeze(-1) * new_c).sum(dim=1)  # (B, D)
 
-        # 5. update hidden / cell only at sel_h — but safely, via clone + indexed write
-        batch = torch.arange(S, device=device)
-        # gather the new parent states for each example
-        updates_h = new_h[batch, sel_h, sel_d]   # (S, D)
-        updates_c = new_c[batch, sel_h, sel_d]   # (S, D)
+        # Update only the selected heads — leave others unchanged
+        update_mask = actions_2d.sum(dim=1, keepdim=True)  # shape (B, 1), 1 for selected head
+        hidden = hidden * (1 - update_mask) + new_h_updated * update_mask
+        cell = cell * (1 - update_mask) + new_c_updated * update_mask
 
-        # clone so we don’t corrupt any autograd metadata on the original tensors
-        hidden_new = hidden.clone()
-        cell_new   = cell.clone()
-
-        # indexed write into the clones
-        act_idx = active_samples.nonzero(as_tuple=True)[0]
-        hidden_new[act_idx, sel_h[act_idx]] = updates_h[act_idx]
-        cell_new  [act_idx, sel_h[act_idx]] = updates_c[act_idx]
-
-        # rebind
-        hidden, cell = hidden_new, cell_new
-
-        # mark dependent as attached
-        mask[batch, sel_d] = 0.0
-
-        return sel_h, sel_d, cat.log_prob(sel_idx), cat.normalized_entropy, hidden, cell, mask
-
+        return cat_distr, gumbel_noise, actions, hidden, cell
 
 
     def _sample_action(self, cat_distr, mask):
@@ -407,47 +393,8 @@ class Solver(nn.Module):
         pairs_no_root = [pair for pair in pairs if pair[0] != pair[1]]  # exclude root self-pair
         return sorted(pairs_no_root, key=lambda pair: get_depth(pair[1]), reverse=True)
 
-    def batch_forward(self,
-                    pair_list,          # list length = N
-                    edges_list,         # list length = N
-                    idx2ctx_list,       # list length = N
-                    outtok_list):       # list length = N
-        # 1. shape sanity-check ------------------------------------------------
-        assert len(pair_list) == len(edges_list) == len(idx2ctx_list) == len(outtok_list), \
-            "All arguments must have the same length (= batch-size N)"
-
-        sem_edges_list, rl_parts, dbg = [], [], []
-
-        # 2. run the per-sample solver ----------------------------------------
-        for n in range(len(edges_list)):
-            sem_edges, rl, d = self.forward(
-                pair_list[n],            # ← one sentence
-                edges_list[n],
-                idx2ctx_list[n],
-                outtok_list[n]           # ← one [idx, token] list
-            )
-            sem_edges_list.append(sem_edges)
-            rl_parts.append(rl)
-            dbg.append(d)
-
-        # 3. stack the scalar RL tensors --------------------------------------
-        rl_info_stacked = {
-            k: torch.cat([p[k] for p in rl_parts], dim=0)
-            for k in rl_parts[0]          # 'log_prob', 'normalized_entropy', …
-        }
-
-        # keep a slot for the reward the caller fills later
-        device = rl_info_stacked["log_prob"].device     # safe – this *is* a tensor
-        rl_info_stacked["reward"] = torch.zeros(len(edges_list), device=device)
-
-        return sem_edges_list, rl_info_stacked, dbg
-    
-
     def forward(self, pair, head_dep_idx, idx2contextual, idx2output_token):
         debug_info = {}
-        entropy_parts  = []
-        logprob_parts  = []
-
 
         # returns either E or P instances depending of whether the token is on the entity or predicate list
         # idx2output_token is a list of pairs like [ 1, "cake"], [3, "cook"]]
@@ -466,56 +413,98 @@ class Solver(nn.Module):
         # Example tree: [(8, 2), (8, 3), (8, 5), (1, 8)]
         # Example idx2semantic: {"1": E("cake"), "3": P("cook")}
 
+        # Find the root index: the only index that does not appear as a dependent
+        #print(f"head_dep_idx: {head_dep_idx}")
+        #root_idx = set(head for head, _ in head_dep_idx) - set(dep for _, dep in head_dep_idx)
+        #print(f"Root index: {root_idx}")
+        #assert len(root_idx) == 1, f"Expected exactly one root, got {root_idx} from {head_dep_idx}"
+        #root_idx = list(root_idx)[0]
+        #debug_info["root_idx"] = root_idx
+
+        #head_dep_idx = self.sort_bottom_up(head_dep_idx)
+        #debug_info["sorted_head_dep_idx"] = head_dep_idx
+
         for head, dep in head_dep_idx:
             # get semantic class of the head and dependent
-            assert str(head) in idx2semantic, f"Head {head} not found in idx2semantic: {idx2semantic}. \nidx2output_token{idx2output_token}\nhead_dep_idx: {head_dep_idx}"
+            #print(head_dep_idx)
             head_sem = idx2semantic[str(head)]
-
-            assert str(dep) in idx2semantic, f"Dependent {dep} not found in idx2semantic: {idx2semantic}. \nidx2output_token{idx2output_token}\nhead_dep_idx: {head_dep_idx}"
             dep_sem = idx2semantic[str(dep)]
 
             head_contextual = idx2contextual[str(head)]
             dep_contextual = idx2contextual[str(dep)]
-
+            #print(f"head norm: {head_contextual.norm().item()}, dep norm: {dep_contextual.norm().item()}")
             semantic_input = torch.cat([head_contextual, dep_contextual], dim=-1)
             
 
             cat_distr, _, actions_i, chosen_rel = self.semantic_merge(head_sem, dep_sem, semantic_input) 
 
             semantic_edges.append((str(head), str(dep), chosen_rel))
-
+            #print(f"Semantic edges so far: {semantic_edges}")
 
             if cat_distr is not None:
                 # collect for RL
-                entropy_parts.append(cat_distr.normalized_entropy)
-                action_idx = actions_i.argmax(dim=-1)              # shape: (), a 0-D tensor
-                logprob_parts.append(cat_distr.log_prob(action_idx))
-
-
+                semantic_normalized_entropy.append(cat_distr.normalized_entropy)
+                semantic_log_prob.append( cat_distr.log_prob(actions_i))
 
         debug_info["idx2semantic"] = idx2semantic
         debug_info["semantic_edges"] = semantic_edges
 
         # calculate the normalized entropy and log probability of the actions taken for RL
-        if len(entropy_parts) == 0:              # no stochastic choice in sentence
-            try:
-                device = next(iter(idx2contextual.values())).device
-            except StopIteration:                     # idx2contextual is empty
-                device = torch.zeros(1).device        # defaults to current default device
-
+        if len(semantic_normalized_entropy) == 0:
+            # No stochastic decision was made in this sample
+            device = idx2contextual[str(head)].device      # ← swap in for x.device
             normalized_entropy = torch.tensor(0.0, device=device)
             semantic_log_prob  = torch.tensor(0.0, device=device)
         else:
-            normalized_entropy = sum(entropy_parts) / len(entropy_parts)
-            semantic_log_prob  = sum(logprob_parts)
+            normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
+            semantic_log_prob  = sum(semantic_log_prob)
 
+        # the final meaning is in the root (the last head idx)
+        #assert head == root_idx, f"Error in the tree structure, the root is not the last head idx.\n\n\n {debug_info}"
+        #final_semantic = copy.deepcopy(idx2semantic[str(head)]) 
+        
+        '''
+        # if final semantic is an entity, we create a ghost predicate for it
+        if isinstance(final_semantic, E):
+            ghost_pred = P('ghost_predicate')
+            ghost_pred.children = [final_semantic]
+            final_semantic = copy.deepcopy(ghost_pred)
+        '''
+        # TODO: deal with this
+        '''
+        # fix the representation of unnaccusative verbs (such as fall), where the subject is actually the theme
+        for action_idx in range(len(final_semantic.action_chain)):
+            action_info = final_semantic.action_chain[action_idx]
+            if action_info[1] is not None and action_info[2] is None and action_info[3] is None:
+                agent_class = copy.deepcopy(action_info[1])
+                assert agent_class.entity_chain[0][1] == 'agent'
+                action = action_info[4]
 
+                # in gen
+                # A donut on the bed rolled .
+                # * bed ( x _ 4 ) ; donut ( x _ 1 ) AND donut . nmod . on ( x _ 1 , x _ 4 ) AND roll . theme ( x _ 5 , x _ 1 )
+                # The girl beside a table rolled .
+                # * girl ( x _ 1 ) ; girl . nmod . beside ( x _ 1 , x _ 4 ) AND table ( x _ 4 ) AND roll . agent ( x _ 5 , x _ 1 )
+
+                # in train
+                # Victoria hoped that a girl rolled .
+                # hope . agent ( x _ 1 , Victoria ) AND hope . ccomp ( x _ 1 , x _ 5 ) AND girl ( x _ 4 ) AND roll . theme ( x _ 5 , x _ 4 )
+
+                if action in self.unac_predicate_list and len(agent_class.entity_chain) == 1:
+                    # if action in self.unac_predicate_list:
+                    agent_class.entity_chain[0][1] = 'theme'
+                    final_semantic.action_chain[action_idx][1] = None
+                    final_semantic.action_chain[action_idx][2] = agent_class
+                    final_semantic.has_agent = False
+                    final_semantic.has_theme = True
+        # update the span2semantic with the fixed final semantic
+        idx2semantic[str(parent_span)] = final_semantic
+        '''
         rl_info = {
-            "normalized_entropy": normalized_entropy.unsqueeze(0),  # shape (1,)
-            "log_prob":            semantic_log_prob.unsqueeze(0),   # shape (1,)
-            "reward":              torch.zeros(1, device=normalized_entropy.device)
+            "normalized_entropy": normalized_entropy.unsqueeze(0),
+            "log_prob": semantic_log_prob.unsqueeze(0),
         }
-                   
+                      
 
         return semantic_edges, rl_info, debug_info
 
@@ -525,7 +514,7 @@ class Solver(nn.Module):
             idx_position = idx[0]
             output_token = idx[1]
 
-            assert output_token in self.entity_list + self.predicate_list, f"Output token {output_token} not in entity or predicate list. \nidx was: {idx}\nidx2output_token was: {idx2output_token}"
+            assert output_token in self.entity_list + self.predicate_list
 
             if output_token in self.entity_list:
                 idx_semantic = "E"
@@ -544,7 +533,7 @@ class Solver(nn.Module):
         # E2E classifier
         if head_sem == 'E' and dep_sem == 'E':
             semantic_score = self.semantic_E_E(semantic_input)
-            semantic_score = torch.nan_to_num(semantic_score, nan=0.0, posinf=50.0, neginf=-50.0)
+            #print(f"Softmax probs (E,E): {F.softmax(semantic_score, dim=-1)}")
 
             semantic_mask = torch.ones_like(semantic_score)
 
@@ -562,8 +551,7 @@ class Solver(nn.Module):
         # P2P classifier
         elif head_sem== 'P' and dep_sem== 'P':
             semantic_score = self.semantic_P_P(semantic_input)
-            semantic_score = torch.nan_to_num(semantic_score, nan=0.0, posinf=50.0, neginf=-50.0)
-
+            #print(f"Softmax probs (P,P): {F.softmax(semantic_score, dim=-1)}")
             semantic_mask = torch.ones_like(semantic_score)
 
             cat_distr = Categorical(semantic_score, semantic_mask)
@@ -580,8 +568,7 @@ class Solver(nn.Module):
         # P2E classifier
         elif head_sem== 'P' and dep_sem == 'E':
             semantic_score = self.semantic_P_E(semantic_input)
-            semantic_score = torch.nan_to_num(semantic_score, nan=0.0, posinf=50.0, neginf=-50.0)
-
+            #print(f"Softmax probs (P,E): {F.softmax(semantic_score, dim=-1)}")
             semantic_mask = torch.ones_like(semantic_score)
 
             cat_distr = Categorical(semantic_score, semantic_mask)
@@ -661,11 +648,12 @@ class HRLModel(nn.Module):
 
         self.case = None
 
+    # TODO: change the paremeters
     def get_high_parameters(self):
-        return list(self.embd_parser.parameters()) + list(self.composer.parameters())
+        return list(chain(self.composer.parameters())) + list(chain(self.embd_parser.parameters()))
 
     def get_low_parameters(self):
-        return list(self.solver.parameters())
+        return list(chain(self.solver.parameters()))
 
     def forward(self, pair, x, sample_num, is_test=False, epoch=None):
         self.is_test = is_test
@@ -673,151 +661,116 @@ class HRLModel(nn.Module):
             pair, x, sample_num, epoch, is_test)
         return batch_forward_info, pred_chain, label_chain, state
 
-    def _forward(self, pair_batch, x_batch, sample_num, epoch, is_test):
-        """
-        pair_batch : list length B
-        x_batch    : LongTensor (B, L)
-        """
-        #printf"pair_batch: {pair_batch}")
-        #printf"x_batch: {x_batch}")
-        state = {}
+    def _forward(self, pair, x, sample_num, epoch, is_test):
+        debug_info = {}
+        assert x.size(0) > 1, f"Input sequence length should be greater than 1. \n{x}\n{pair}\n{x.size()}"
+        # [A] [cake] [was] [cooked] [by] [the] [scientist]
+    
+        bottom_idx = self.abstractor(x)
+        # [1, 3, 6]
+        # Corresponding to: cake, cooked, scientist
 
-        B, L = x_batch.shape
-        device = x_batch.device
+        idx2output_token = self.classifier(x, bottom_idx)
+        # [[1, "cake"], [3, "cook"], [6, "scientist"]]
 
-        #printf"HRLModel forward: B={B}, L={L}")
-        word_mask = (x_batch != PAD_token).float()   # (B, L)
-        #printf"word_mask shape: {word_mask.shape}")
-        #printf"word_mask: {word_mask}")
+        # repeat sample_num (10) times to explore different trees
+        #bottom_idx_batch = [bottom_idx for _ in range(sample_num)]
+        #idx2output_token_batch = [idx2output_token for _ in range(sample_num)]
 
-        # 1. bottom abstraction for every sentence
-        bottom_all, idx2outtok_all = [], []
-        for b in range(B):
-            bottom_idx = self.abstractor(x_batch[b])
-            bottom_all.append(bottom_idx)
-            idx2outtok_all.append(self.classifier(x_batch[b], bottom_idx))
-        #printf"bottom_all: {bottom_all}")
-        #printf"idx2outtok_all: {idx2outtok_all}")
-
-        # 2. embeddings once → (B, L, D)
-        pos = torch.arange(L, device=device)
-        x_emb = self.embd_parser(x_batch)# + self.position_embedding(pos)
-
-        #printf"x_emb shape: {x_emb.shape}")
-
-        # 3. replicate the *sample* dim, then flatten (B*N, L, D)
-        N = sample_num
-        x_emb = x_emb.unsqueeze(1).repeat(1, N, 1, 1).view(B*N, L, -1)        # (B*N,L,D)
-        #printf"x_emb after repeat: {x_emb.shape}")
-
-        # same for bottom indices
-        max_B = max(len(b) for b in bottom_all)
-        #printf"max_B: {max_B}")
-        bottom_pad = torch.full((B, max_B), -1, device=device, dtype=torch.long)
-        #printf"bottom_pad shape: {bottom_pad.shape}")
-        #printf"bottom_pad: {bottom_pad}")
-        for b, idx in enumerate(bottom_all):
-            bottom_pad[b, :len(idx)] = torch.tensor(idx, device=device, dtype=torch.long)
-        #printf"bottom_pad shape after filling: {bottom_pad.shape}")
-        #printf"bottom_pad after filling: {bottom_pad}")
+        batch_forward_info = []
         
-        bottom = bottom_pad.repeat_interleave(N, dim=0)
-        #printf"bottom shape after repeat: {bottom.shape}")
-        #printf"bottom after repeat: {bottom}")
+        # Get embeddings
+        #positions = torch.arange(len(x), device=x.device)
+        #position_embed = self.position_embedding(positions)
+        x_embedding = self.embd_parser(x)# + position_embed
 
-        # 4. composer / solver ONCE on the merged batch
-        word_mask_rep = word_mask.repeat_interleave(N, 0)  # (B*N, L)
-        #printf"word_mask_rep shape: {word_mask_rep.shape}")
-        #printf"word_mask_rep: {word_mask_rep}")
-        edges, idx2ctx, comp_rl = self.composer.batch_forward(x_emb, bottom, word_mask_rep)
-        #printf"edges {edges}")
-        #printf"comp_rl {comp_rl}")
 
-        idx2outtok_rep = list(chain.from_iterable(repeat(m, N) for m in idx2outtok_all))
-        pair_rep = list(chain.from_iterable(repeat(p, N) for p in pair_batch))
-        #printf"idx2outtok_rep shape: {len(idx2outtok_rep)}")
-        #printf"pair_rep shape: {len(pair_rep)}")
-        
-        idx2ctx_detached = [
-            {k: v.detach() for k, v in ctx.items()}
-            for ctx in idx2ctx
-        ]
-        sem_edges, sol_rl, _ = self.solver.batch_forward(
-            pair_rep, edges, idx2ctx_detached, idx2outtok_rep
-        )
+        # we iterate over samples of the batch, and apply semantic composition
+        for in_batch_idx in range(sample_num):
+            #print(f"Pair: {pair}")
+            # it contains the normalized entropy, log prob, parent-child pairs (the merges that were made) and idx2repre (embeddings of tokens)
+            # span2variable_batch contains a mapping of the abstracted spans ([1, 1]) to the tokens (cake, cooked, scientist)
+            '''
+            rl_info = {
+                "normalized_entropy": torch.stack(entropies).mean(),
+                "log_prob": torch.stack(log_probs).sum()
+            }
+            '''
+            edges, idx2contextual, composer_rl_info = self.composer(x_embedding, bottom_idx)
 
-        #printf"sem_edges: {sem_edges}")
-        #printf"sol_rl: {sol_rl}")
-        
-        # 5. reward + bookkeeping (vectorised)
-        N = sample_num                     # already defined
-        
-        gold_edges_base = [self.process_gold(p[1])[0] for p in pair_batch]   # length B
-        #printf"gold_edges_base: {gold_edges_base}")
-        tok_maps_base   = [{str(i): w for i, w in m}
-                        for m in idx2outtok_all]                          # length B
-        #printf"tok_maps_base: {tok_maps_base}")
 
-        # replicate sentence-level structures so they line up with sem_edges (B*N)
-        gold_edges_rep = [gold_edges_base[b] for b in range(B) for _ in range(N)]
-        tok_maps_rep   = [tok_maps_base[b]   for b in range(B) for _ in range(N)]
-        #printf"gold_edges_rep: {gold_edges_rep}")
-        #printf"tok_maps_rep: {tok_maps_rep}")
+            # the solvers walks the tree bottom up, applies semantic composition rules, and generates a logical form
+            #print(bottom_idx)
+            semantic_edges, solver_rl_info, debug_info["solver"] = self.solver(pair, 
+                                                                        edges, 
+                                                                        idx2contextual, 
+                                                                        idx2output_token)
+            #print(semantic_edges)
+            #total_log_prob = composer_rl_info["log_prob"] + solver_rl_info["log_prob"]
+            #total_entropy = composer_rl_info["normalized_entropy"] + solver_rl_info["normalized_entropy"]
 
-        assert len(gold_edges_rep) == B*N
-        assert len(tok_maps_rep)   == B*N     # sanity
+            # convert the resulting tree structure into a flat chain of tokens representing the logical form
+            #pred_edges = self.translate(final_semantic)
+            #print(f"idx2output_token: {idx2output_token}")
+            #print(f"Semantic edges: {semantic_edges}")
+            pred_edges = [[str(idx2output_token[[i[0] for i in idx2output_token].index(int(edge[0]))][1]), str(idx2output_token[[i[0] for i in idx2output_token].index(int(edge[1]))][1]), edge[2]] for edge in semantic_edges]
+            #print(f"Predicted edges: {pred_edges}")
+            # conver the gold label into a flat chain of tokens representing the logical form
+            gold_edges, debug_info["process_gold"] = self.process_gold(pair[1])
+            #print(f"Gold edges: {gold_edges}")
 
-        rewards         = torch.zeros(B*N, 2, device=device)
-        pred_edges_all  = []
+            #if "who" in pair[1] or "what" in pair[1]:
+            #    print("")
+            #    print(f"Gold Label: {pair[1]}")
+            #    print(f"Parsed Gold Label {label_chain}")
+            #    print(f"Predicted Label Chain {pred_chain}")
+            #Gold Label: * table ( x _ 6 ) ; cook . agent ( x _ 1 , ? ) and cook . theme ( x _ 1 , x _ 3 ) and cake ( x _ 3 ) and cake . nmod . beside ( x _ 3 , x _ 6 )
+            #Parsed Gold Label ['cook', '?', 'cake', 'beside', 'table', 'None']
+            #Predicted Label Chain ['cook', 'who', 'cake', 'beside', 'table', 'None']
 
-        for i in range(B*N):
-            m    = tok_maps_rep[i]
-            gold = gold_edges_rep[i]
-            pred = [[m[e[0]], m[e[1]], e[2]] for e in sem_edges[i]]
+            # and calculate the reward for the generated logical form by comparing to the gold
+            composer_rl_info['reward'], solver_rl_info['reward'] = self.get_reward(pred_edges, gold_edges)
+            #print(f"Composer reward: {composer_rl_info['reward']}, Solver reward: {solver_rl_info['reward']}")
+            #print(f"Reward: {reward}")
+            batch_forward_info.append([composer_rl_info, solver_rl_info])
 
-            c_r, s_r = self.get_reward(pred, gold)
+            '''
+            if pair[0] == 'a visitor gave a cookie to the girl that emma rolled':
+                import pickle
+                with open("debug_info.pkl", "wb") as f:
+                    pickle.dump(span2semantic[str(end_span)], f)
+                print("Saved debug info")
+                print(pred_chain)
+                quit()
+            '''   
 
-            comp_rl["reward"][i] = c_r
-            sol_rl["reward"][i]  = s_r
-            pred_edges_all.append(pred)
-            rewards[i] = torch.tensor([c_r, s_r], device=device)
-            #printf"Processing sentence {i}:")
-            #printf"  Predicted edges: {pred}")
-            #printf"  Gold edges: {gold}")
-            #printf"composer reward: {c_r}, solver reward: {s_r}")
-
-        # 6. reshape back so training loop’s `flat = …` still works
-        comp_split = [{k: v[i].unsqueeze(0) for k, v in comp_rl.items()}
-                    for i in range(B * N)]
-        #printf"comp_split: {comp_split}")
-        sol_split  = [{k: v[i].unsqueeze(0) for k, v in sol_rl.items()}
-                    for i in range(B * N)]
-        #printf"sol_split: {sol_split}")
-        batch_forward = [[comp_split[i * N + n], sol_split[i * N + n]]
-                        for i in range(B) for n in range(N)]
-        #printf"batch_forward: {batch_forward}")
-        #printf"pred_edges_all: {pred_edges_all}")
-
-        pred_per_sentence  = [pred_edges_all[b * N]   for b in range(B)]
-        gold_per_sentence  = [gold_edges_base[b]      for b in range(B)]
-        comp_reward_sent = [comp_rl["reward"][b * N].item() for b in range(B)]
-        sol_reward_sent  = [sol_rl["reward"][b * N].item() for b in range(B)]
-
-        state = ([
-            {"pred":  pred_per_sentence[b],
-            "gold":  gold_per_sentence[b],
-            "comp_reward": comp_reward_sent[b],
-            "sol_reward":  sol_reward_sent[b]}
-            for b in range(B)
-        ] if is_test else {})
-
-        return batch_forward, pred_per_sentence, gold_per_sentence, state
-
+            #print(debug_info["composer"])
+            #print(debug_info["solver"])
+            #print(f"Predicted edges: {pred_edges}")
+            #print(f"Gold edges: {gold_edges}")
+            #print(f"Reward: {reward}")         
+            #quit()
+        # pdb.set_trace()
+        state = {
+            "bottom_idx": bottom_idx,
+            #"comp_heads": debug_info["composer"]["heads"],
+            #"head_dep_edges": debug_info["solver"]["sorted_head_dep_idx"],
+            "pred_edges": pred_edges,
+            "gold_edges": gold_edges,
+            "pair": pair,
+            "comp reward": composer_rl_info['reward'],
+            "solv reward": solver_rl_info['reward']
+        }
+        #print(f"==========\n{state}\n")
+        #quit()
+        return batch_forward_info, pred_edges, gold_edges, state
 
 
     def get_reward(self, pred_edges, gold_edges):
         """ Calculate the reward for the generated logical form by comparing to the gold."""
         len_gold = len(gold_edges)
+        pred_set = set(['|'.join(edge) for edge in pred_edges])
+        gold_set = set(['|'.join(edge) for edge in gold_edges])
 
         pred_unlabelled_set = set(['|'.join(edge[:2]) for edge in pred_edges])
         gold_unlabelled_set = set(['|'.join(edge[:2]) for edge in gold_edges])
@@ -833,6 +786,23 @@ class HRLModel(nn.Module):
         solver_reward = good_labels / len(good_edges) if len(good_edges) > 0 else 0
         
         return composer_reward, solver_reward
+
+    def get_entity_chain(self, semantic):
+        if semantic is None:
+            return ['None']
+
+        assert isinstance(semantic, E)
+        flat_chain = []
+        # [in_word / on_word / beside_word, agent_word / theme_word / recipient_word, entity]
+        for entity_idx, entity_info in enumerate(semantic.entity_chain):
+            if entity_idx == 0:
+                flat_entity_chain = [entity_info[2]]
+            else:
+                assert entity_info[0] is not None
+                flat_entity_chain = [entity_info[0], entity_info[2]]
+            flat_chain = flat_chain + flat_entity_chain
+
+        return flat_chain
 
     def action_info_dict(self, action_info):
         action_info_dict = {

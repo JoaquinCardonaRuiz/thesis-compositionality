@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 from functools import partial
+import sys
 
 import boto3
 import botocore.exceptions
@@ -61,6 +62,9 @@ class CloudWatchLogsHandler(logging.Handler):
             self.sequence_token = resp["nextSequenceToken"]
         except botocore.exceptions.ClientError as e:
             # CloudWatch rejected the event; fall back to console so nothing is lost
+            print("CloudWatchLogsHandler error:", e, file=sys.stderr)
+        except botocore.exceptions.EndpointConnectionError as e:
+            # CloudWatch is not available, e.g. when running on a local machine
             print("CloudWatchLogsHandler error:", e, file=sys.stderr)
 
 
@@ -189,86 +193,91 @@ def length_to_mask(length):
         length_expanded = length[:, None].expand_as(range_expanded)
         return (range_expanded < length_expanded).float()
 
+
 class Categorical:
     def __init__(self, scores, mask=None):
-        """
-        scores: Tensor[..., K] of raw logits
-        mask:   same shape as scores, 1.0 for valid, 0.0 for invalid
-        """
+        self.mask = mask
         if mask is None:
-            # no masking → just pass logits straight through
-            logits = scores
-            self.num_cat = scores.shape[-1]
-            self.log_n   = math.log(self.num_cat)
+            self.cat_distr = TorchCategorical(F.softmax(scores, dim=-1))
+            self.n = scores.shape[0]
+            self.log_n = math.log(self.n)
         else:
-            # mask out invalid logits with -inf
-            logits = scores.masked_fill(mask == 0, float('-inf'))
-            # detect rows where everything was masked → give uniform logits
-            all_masked = (mask.sum(dim=-1, keepdim=True) == 0)
-            if all_masked.any():
-                logits = torch.where(
-                    all_masked.expand_as(logits),
-                    torch.zeros_like(logits),
-                    logits
-                )
-            # record actual number of valid categories per row
-            self.num_cat = mask.sum(dim=-1)            # Tensor[...,]
-            # log of count, for normalization
-            self.log_n   = (self.num_cat + 1e-17).log()
+            self.n = self.mask.sum(dim=-1)
+            self.log_n = (self.n + 1e-17).log()
+            self.cat_distr = TorchCategorical(Categorical.masked_softmax(scores, self.mask))
 
-        # build the distribution with *logits* (internally uses log‐softmax)
-        self.cat_distr = TorchCategorical(logits=logits)
-
-    @property
+    @lazy_property
     def probs(self):
         return self.cat_distr.probs
 
-    @property
+    @lazy_property
     def logits(self):
         return self.cat_distr.logits
 
-    @property
+    @lazy_property
     def entropy(self):
-        # use the built-in entropy if no mask
-        if not hasattr(self, 'mask') or self.mask is None:
-            ent = self.cat_distr.entropy()
-            # zero‐out entropy if only one class
-            return ent * (self.num_cat != 1)
-        # otherwise compute masked entropy manually
-        p     = self.probs                 # [..., K]
-        logp  = self.logits
-        valid = p > 0                      # mask away the 0 × (-inf) terms
-        ent   = -(logp[valid] * p[valid]).sum(dim=-1)
-        return ent * (self.num_cat != 1).float()
+        if self.mask is None:
+            return self.cat_distr.entropy() * (self.n != 1)
+        else:
+            entropy = - torch.sum(self.cat_distr.logits * self.cat_distr.probs * self.mask, dim=-1)
+            does_not_have_one_category = (self.n != 1.0).to(dtype=torch.float32)
+            # to make sure that the entropy is precisely zero when there is only one category
+            return entropy * does_not_have_one_category
 
-    @property
+    @lazy_property
     def normalized_entropy(self):
-        # divide by log(number of valid classes)
         return self.entropy / (self.log_n + 1e-17)
 
     def sample(self):
         return self.cat_distr.sample()
 
-    def rsample(self, temperature=None, gumbel_noise=None, eps=1e-6):
-        # Gumbel‐softmax sampling (as before), but using logits & mask safely
+    def rsample(self, temperature=None, gumbel_noise=None, eps=1e-5):
         if gumbel_noise is None:
             with torch.no_grad():
-                u = torch.empty_like(self.probs).uniform_(eps, 1 - eps)
-                gumbel_noise = -(-u.log()).log()
+                uniforms = torch.empty_like(self.probs).uniform_()
+                uniforms = uniforms.clamp(min=eps, max=1 - eps)
+                gumbel_noise = -(-uniforms.log()).log()
 
-        logits = self.logits if temperature is None else self.logits / temperature
-        noisy = logits + gumbel_noise
-        # mask out again (since adding gumbel may disturb -inf)
-        if hasattr(self, 'mask') and self.mask is not None:
-            noisy = noisy.masked_fill(self.mask == 0, float('-inf'))
-        y = F.softmax(noisy, dim=-1)
+        elif gumbel_noise.shape != self.probs.shape:
+            raise ValueError
+
         if temperature is None:
-            # hard sample
-            idx = y.argmax(dim=-1, keepdim=True)
-            y_hard = torch.zeros_like(y).scatter_(-1, idx, 1.0)
-            return y_hard, gumbel_noise
+            with torch.no_grad():
+                scores = (self.logits + gumbel_noise)
+                scores = Categorical.masked_softmax(scores, self.mask)
+                sample = torch.zeros_like(scores)
+                sample.scatter_(-1, scores.argmax(dim=-1, keepdim=True), 1.0)
+                return sample, gumbel_noise
         else:
-            return y, gumbel_noise
+            scores = (self.logits + gumbel_noise) / temperature
+            sample = Categorical.masked_softmax(scores, self.mask)
+            return sample, gumbel_noise
 
     def log_prob(self, value):
-        return self.cat_distr.log_prob(value)
+        if value.dtype == torch.long:
+            if self.mask is None:
+                return self.cat_distr.log_prob(value)
+            else:
+                return self.cat_distr.log_prob(value) * (self.n != 0.).to(dtype=torch.float32)
+        else:
+            max_values, mv_idxs = value.max(dim=-1)
+            relaxed = (max_values - torch.ones_like(max_values)).sum().item() != 0.0
+            if relaxed:
+                raise ValueError("The log_prob can't be calculated for the relaxed sample!")
+            return self.cat_distr.log_prob(mv_idxs) * (self.n != 0.).to(dtype=torch.float32)
+
+    @staticmethod
+    def masked_softmax(logits, mask):
+        """
+        This method will return valid probability distribution for the particular instance if its corresponding row
+        in the `mask` matrix is not a zero vector. Otherwise, a uniform distribution will be returned.
+        This is just a technical workaround that allows `Categorical` class usage.
+        If probs doesn't sum to one there will be an exception during sampling.
+        """
+        if mask is not None:
+            probs = F.softmax(logits, dim=-1) * mask
+            probs = probs + (mask.sum(dim=-1, keepdim=True) == 0.).to(dtype=torch.float32)
+            Z = probs.sum(dim=-1, keepdim=True)
+            return probs / Z
+        else:
+            return F.softmax(logits, dim=-1)
