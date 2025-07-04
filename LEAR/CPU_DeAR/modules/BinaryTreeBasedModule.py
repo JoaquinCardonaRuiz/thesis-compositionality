@@ -98,6 +98,9 @@ class BinaryTreeBasedModule(nn.Module):
 
 
         h, c = self.linear(x).tanh().chunk(chunks=2, dim=-1)
+        assert not torch.isnan(h).any(), f"NaN in hidden state: {h}"
+        assert not torch.isnan(c).any(), f"NaN in cell state: {c}"
+
         return h.squeeze(0), c.squeeze(0)  # remove batch dim again
 
     @staticmethod

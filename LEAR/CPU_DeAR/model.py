@@ -1,3 +1,4 @@
+from collections import defaultdict
 from itertools import chain
 
 from torch import nn
@@ -22,77 +23,6 @@ x4_token = 6
 
 all_entities = ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]
 available_src_vars = ['x1', 'x2', 'x3', 'x4']
-
-class Node:
-    def __repr__(self,depth=0):
-        s = f"{'\t'*depth}{self.rel} {self.__class__.__name__}({self.token}) - {self.ix}"
-        for child in self.children:
-            s += f"\n{child.__repr__(depth=depth+1)}"
-        return s
-
-    def __str__(self,depth=0):
-        return self.__repr__(depth=depth)
-
-class E(Node):  # Entities (M0~M9)
-    # 0: in
-    # 1: on
-    # 2: beside
-    # 3: relcl
-    def __init__(self, entity, ix=-1):
-        self.children = []
-        self.token = entity
-        self.rel = ''
-        self.ix = ix
-
-    def add_child(self, child, rel):
-        assert rel in ['in', 'on', 'beside', 'relcl']
-        if rel == 'relcl':
-            assert isinstance(child, P)
-        else:
-            assert isinstance(child, E)
-
-        child_aux = copy.deepcopy(child)
-        child_aux.rel = rel
-        self.children.append(child_aux)
-
-
-
-
-class P(Node):
-    def __init__(self, action, ix=-1):
-        self.children = []
-        self.token = action
-        self.rel = ''
-        self.ix = ix
-
-        self.has_role = {"agent": False, "theme": False, "recipient": False}
-
-        self.is_causative = False
-        self.is_unaccusative = False
-
-        self.is_full = False
-
-
-    def add_child(self, child, rel):
-        assert rel in ['ccomp', 'xcomp', 'agent', 'theme', 'recipient']
-        if rel == 'ccomp' or rel == 'xcomp':
-            assert isinstance(child, P)
-        else:
-            assert isinstance(child, E)
-            if rel == 'agent':
-                self.has_role['agent'] = True
-            elif rel == 'theme':
-                self.has_role['theme'] = True
-            elif rel == 'recipient':
-                self.has_role['recipient'] = True
-            if self.has_role['agent'] and \
-                    self.has_role['theme'] and \
-                    self.has_role['recipient']:
-                self.is_full = True
-
-        child_aux = copy.deepcopy(child)
-        child_aux.rel = rel
-        self.children.append(child_aux)
 
 
 class BottomAbstrator(nn.Module):
@@ -159,6 +89,17 @@ class DepTreeComposer(BinaryTreeBasedModule):
                 nn.init.constant_(layer.bias, 0.0)
 
 
+    def _find(self, i):
+        # path-compression
+        while self.parent[i] != i:
+            self.parent[i] = self.parent[self.parent[i]]
+            i = self.parent[i]
+        return i
+
+    def _union(self, a, b):
+        ra, rb = self._find(a), self._find(b)
+        if ra != rb:
+            self.parent[rb] = ra
 
     def forward(self, x_embedding, bottom_idx):
         """ Forward pass of the DepTreeComposer.
@@ -176,8 +117,10 @@ class DepTreeComposer(BinaryTreeBasedModule):
         B = len(bottom_idx)
         #print(f"Batch size: {B}")
         mask = torch.ones((x_embedding.size(0),), dtype=torch.float32, device=x_embedding.device)
+
         #print(f"Mask: {mask}")
 
+        self.parent = list(range(B))
         
         if USE_CUDA:
             mask = mask.cuda()
@@ -199,15 +142,15 @@ class DepTreeComposer(BinaryTreeBasedModule):
 
         edges = []
         while len(edges) < len(bottom_idx) - 1: 
-
-            cat_distr, _, actions, hidden, cell = self._make_step(hidden, cell, mask)
+            is_last = int(mask.sum().item()) == 1
+            cat_distr, _, actions, hidden, cell = self._make_step(hidden, cell, mask, is_last)
             
             actions_idx_tensor = actions.argmax()
             actions_idx = actions_idx_tensor.item()
             B = hidden.size(0)
             head_idx, dep_idx = divmod(actions_idx, B)
 
-            # Update contextual representation for the dependent
+            # Update contextual representation for the head
             idx2contextual[str(bottom_idx[head_idx])] = hidden[head_idx]
 
             log_probs.append(cat_distr.log_prob(actions_idx_tensor))
@@ -215,6 +158,8 @@ class DepTreeComposer(BinaryTreeBasedModule):
 
             edges.append((bottom_idx[head_idx], bottom_idx[dep_idx]))
             mask[dep_idx] = 0  # Mark dep as attached
+            self._union(head_idx, dep_idx)
+
             # debug prints
             #print(f"Current edges: {edges}")
             #print(f"Action taken: {actions_idx} (head: {head_idx}, dep: {dep_idx})")
@@ -232,7 +177,7 @@ class DepTreeComposer(BinaryTreeBasedModule):
 
         return edges, idx2contextual, rl_info
     
-    def _make_step(self, hidden, cell, mask_ori):
+    def _make_step(self, hidden, cell, mask_ori, is_last):
         """
         One REINFORCE step: score all (head, dep) pairs and update selected head.
         
@@ -250,13 +195,22 @@ class DepTreeComposer(BinaryTreeBasedModule):
         """
         B, D = hidden.size()
         device = hidden.device
-        mask = copy.deepcopy(mask_ori)
+        mask = mask_ori
+
+        #if torch.isnan(hidden).any() or torch.isnan(cell).any():
+        #    print("Entering _make_step with NaNs in hidden or cell")
+        #    print("hidden:", hidden)
+        #    print("cell:", cell)
+        #    raise RuntimeError("Hidden/cell are already NaN!")
+
 
         # Build head × dep matrices
         head_h = hidden.unsqueeze(1).expand(B, B, D)  # (B, B, D)
         head_c = cell.unsqueeze(1).expand(B, B, D)
         dep_h = hidden.unsqueeze(0).expand(B, B, D)
         dep_c = cell.unsqueeze(0).expand(B, B, D)
+        #if torch.isnan(head_h).any() or torch.isnan(head_c).any() or torch.isnan(dep_h).any() or torch.isnan(dep_c).any():
+        #    raise RuntimeError(f"NaN detected in head or dep matrices: \nhead_h={head_h}, \nhead_c={head_c}, \ndep_h={dep_h}, \ndep_c={dep_c}, \nmask={mask}")
 
         # Compose new head representations based on head←dep
         new_h, new_c = self.tree_lstm_cell(
@@ -265,23 +219,40 @@ class DepTreeComposer(BinaryTreeBasedModule):
             dep_h.reshape(-1, D),
             dep_c.reshape(-1, D)
         )
+
+        #if torch.isnan(new_h).any() or torch.isnan(new_c).any():
+        #    raise RuntimeError(f"NaN detected in TreeLSTM outputs: \nnew_h={new_h}, \nnew_c={new_c}")
+
         new_h = new_h.view(B, B, D)
         new_c = new_c.view(B, B, D)
 
         # Score all head→dep arcs
         arc_features = torch.cat([head_h, dep_h], dim=-1)  # (B, B, 2D)
         score = self.arc_scorer(arc_features).squeeze(-1)  # (B, B)
+        #if torch.isnan(score).any():
+        #    raise RuntimeError("NaN detected in arc scores: \n score={score}")
 
         # Mask invalid arcs: prevent attaching to already attached deps
         arc_mask = torch.ones_like(score, dtype=torch.float32, device=device)
         arc_mask.fill_diagonal_(0)  # no self-loops
         arc_mask *= mask.unsqueeze(0)  # block already-attached deps (on dep axis)
 
+        if not is_last:
+            for i in range(B):
+                for j in range(B):
+                    if self._find(i) == self._find(j):
+                        arc_mask[i, j] = 0.0
+
         # Flatten scores and masks for categorical sampling
         flat_score = score.view(-1)
         flat_mask = arc_mask.view(-1)
+        #if torch.isnan(flat_score.any()):
+        #    raise RuntimeError(f"NaN detected in flat scores: \nflat_score={flat_score}")
+        #if torch.isnan(flat_mask.any()):
+        #    raise RuntimeError(f"NaN detected in flat mask: \nflat_mask={flat_mask}")
 
         # Sample from categorical distribution over valid arcs
+        assert flat_mask.sum() > 0, f"No valid arcs left. Mask: {mask}"
         cat_distr = Categorical(flat_score, flat_mask)
         actions, gumbel_noise = self._sample_action(cat_distr, flat_mask)
         actions_2d = actions.view(B, B)  # (B, B)
@@ -375,23 +346,6 @@ class Solver(nn.Module):
         self.eval_swr_actions = eval_swr_actions
         self.debug_info = debug_info
 
-    def sort_bottom_up(self, pairs):
-        """ Sort dependent pairs in a bottom-up manner.
-        
-        This is so the tree can be traversed bottom-up and no parent is visited before its children.
-        """
-        # Build parent mapping and collect children
-        parent_map = {dep: head for head, dep in pairs if head != dep}
-        def get_depth(node):
-            depth = 0
-            while node in parent_map and node != parent_map[node]:
-                node = parent_map[node]
-                depth += 1
-            return depth
-
-        # Sort pairs by depth of the dependent node
-        pairs_no_root = [pair for pair in pairs if pair[0] != pair[1]]  # exclude root self-pair
-        return sorted(pairs_no_root, key=lambda pair: get_depth(pair[1]), reverse=True)
 
     def forward(self, pair, head_dep_idx, idx2contextual, idx2output_token):
         debug_info = {}
@@ -406,6 +360,7 @@ class Solver(nn.Module):
         debug_info["idx2output_token"] = idx2output_token
 
         semantic_edges = []
+        edge_probs = []
 
         semantic_normalized_entropy = []
         semantic_log_prob = []
@@ -421,9 +376,6 @@ class Solver(nn.Module):
         #root_idx = list(root_idx)[0]
         #debug_info["root_idx"] = root_idx
 
-        #head_dep_idx = self.sort_bottom_up(head_dep_idx)
-        #debug_info["sorted_head_dep_idx"] = head_dep_idx
-
         for head, dep in head_dep_idx:
             # get semantic class of the head and dependent
             #print(head_dep_idx)
@@ -436,9 +388,11 @@ class Solver(nn.Module):
             semantic_input = torch.cat([head_contextual, dep_contextual], dim=-1)
             
 
-            cat_distr, _, actions_i, chosen_rel = self.semantic_merge(head_sem, dep_sem, semantic_input) 
+            cat_distr, _, actions_i, chosen_rel, probs = self.semantic_merge(head_sem, dep_sem, semantic_input) 
 
             semantic_edges.append((str(head), str(dep), chosen_rel))
+            edge_probs.append(probs)
+
             #print(f"Semantic edges so far: {semantic_edges}")
 
             if cat_distr is not None:
@@ -446,8 +400,7 @@ class Solver(nn.Module):
                 semantic_normalized_entropy.append(cat_distr.normalized_entropy)
                 semantic_log_prob.append( cat_distr.log_prob(actions_i))
 
-        debug_info["idx2semantic"] = idx2semantic
-        debug_info["semantic_edges"] = semantic_edges
+        debug_info["pre_semantic_edges"] = semantic_edges
 
         # calculate the normalized entropy and log probability of the actions taken for RL
         if len(semantic_normalized_entropy) == 0:
@@ -459,54 +412,132 @@ class Solver(nn.Module):
             normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
             semantic_log_prob  = sum(semantic_log_prob)
 
-        # the final meaning is in the root (the last head idx)
-        #assert head == root_idx, f"Error in the tree structure, the root is not the last head idx.\n\n\n {debug_info}"
-        #final_semantic = copy.deepcopy(idx2semantic[str(head)]) 
-        
-        '''
-        # if final semantic is an entity, we create a ghost predicate for it
-        if isinstance(final_semantic, E):
-            ghost_pred = P('ghost_predicate')
-            ghost_pred.children = [final_semantic]
-            final_semantic = copy.deepcopy(ghost_pred)
-        '''
-        # TODO: deal with this
-        '''
-        # fix the representation of unnaccusative verbs (such as fall), where the subject is actually the theme
-        for action_idx in range(len(final_semantic.action_chain)):
-            action_info = final_semantic.action_chain[action_idx]
-            if action_info[1] is not None and action_info[2] is None and action_info[3] is None:
-                agent_class = copy.deepcopy(action_info[1])
-                assert agent_class.entity_chain[0][1] == 'agent'
-                action = action_info[4]
+        semantic_edges = self._post_process(semantic_edges, edge_probs, idx2contextual, idx2semantic)
+        debug_info["semantic_edges"] = semantic_edges
 
-                # in gen
-                # A donut on the bed rolled .
-                # * bed ( x _ 4 ) ; donut ( x _ 1 ) AND donut . nmod . on ( x _ 1 , x _ 4 ) AND roll . theme ( x _ 5 , x _ 1 )
-                # The girl beside a table rolled .
-                # * girl ( x _ 1 ) ; girl . nmod . beside ( x _ 1 , x _ 4 ) AND table ( x _ 4 ) AND roll . agent ( x _ 5 , x _ 1 )
-
-                # in train
-                # Victoria hoped that a girl rolled .
-                # hope . agent ( x _ 1 , Victoria ) AND hope . ccomp ( x _ 1 , x _ 5 ) AND girl ( x _ 4 ) AND roll . theme ( x _ 5 , x _ 4 )
-
-                if action in self.unac_predicate_list and len(agent_class.entity_chain) == 1:
-                    # if action in self.unac_predicate_list:
-                    agent_class.entity_chain[0][1] = 'theme'
-                    final_semantic.action_chain[action_idx][1] = None
-                    final_semantic.action_chain[action_idx][2] = agent_class
-                    final_semantic.has_agent = False
-                    final_semantic.has_theme = True
-        # update the span2semantic with the fixed final semantic
-        idx2semantic[str(parent_span)] = final_semantic
-        '''
         rl_info = {
             "normalized_entropy": normalized_entropy.unsqueeze(0),
             "log_prob": semantic_log_prob.unsqueeze(0),
         }
                       
-
         return semantic_edges, rl_info, debug_info
+
+    def _post_process(self, semantic_edges, edge_probs, idx2contextual, idx2semantic):
+
+        # index edges by head
+        by_head = defaultdict(list)
+        for idx, (h, d, r) in enumerate(semantic_edges):
+            by_head[h].append(idx)
+
+        # RULE 1
+        # For each predicate head with >1 dependents of the same rel, we keep the one with the highest probability
+        for h, edge_idxs in by_head.items():
+            if idx2semantic[h] != "P": 
+                continue
+
+            # collect only deps that are entities
+            ent_edges = [i for i in edge_idxs
+                         if idx2semantic[semantic_edges[i][1] ] == "E"]
+            # group by current rel label
+            rel_groups = defaultdict(list)
+            for i in ent_edges:
+                rel = semantic_edges[i][2]
+                rel_groups[rel].append(i)
+
+            # if any group has >1, resolve duplicates
+            for rel, idx_list in rel_groups.items():
+                if len(idx_list) <= 1: 
+                    continue
+                # we have a clash: multiple edges with the same rel
+                # for all but the TOP-1 under THIS rel, reassign them
+                sorted_by_conf = sorted(
+                    idx_list,
+                    key=lambda i: edge_probs[i][rel],
+                    reverse=True
+                )
+                # keep the first as is; fix all the rest
+                for i in sorted_by_conf[1:]:
+                    # find the best REL (≠ current rel) with max p
+                    best_rel, best_p = max(
+                        ((r2, p2) for r2, p2 in edge_probs[i].items()
+                                  if r2 != rel),
+                        key=lambda x: x[1]
+                    )
+                    semantic_edges[i] = (
+                        semantic_edges[i][0],  # head
+                        semantic_edges[i][1],  # dep
+                        best_rel
+                    )
+
+        # RULE 2
+        # entity head with predicate dep (so current rel must be “relcl”)
+        for idx, (h, d, r) in enumerate(list(semantic_edges)):
+            if idx2semantic[h] == "E" and idx2semantic[d] == "P":
+                assert r == "relcl", f"Expected relcl, got {r} for edge with semantics {idx2semantic[h]}→{idx2semantic[d]}"
+                # add a new opposite edge (predicate→entity)
+                # classify with P_E classifier (mask out “recipient”)
+                semantic_input = torch.cat([idx2contextual[h], idx2contextual[d]], dim=-1)
+                pe_logits = self.semantic_P_E(semantic_input)
+                # mask out the 'recipient' class (index 2)
+                neg_inf = torch.finfo(pe_logits.dtype).min
+                # make a mask: [1,1,0] → log-mask = [0,0,-inf]
+                mask = pe_logits.new_tensor([1.0, 1.0, 0.0])
+                pe_logits = pe_logits + (mask.log() * neg_inf)
+                pe_probs = F.softmax(pe_logits, dim=-1)
+                # now only agent/theme compete
+                # pick between indices 0 and 1
+                chosen_idx = pe_probs[:2].argmax().item()
+                pe_rels = ["agent", "theme"]
+                chosen = pe_rels[chosen_idx]
+                semantic_edges.append((d, h, chosen))
+        
+        by_head = defaultdict(list)
+        for idx, (h, d, r) in enumerate(semantic_edges):
+            by_head[h].append(idx)
+
+        # RULE 3
+        # xcomp from pred to pred
+        for idx, (h, d, r) in enumerate(list(semantic_edges)):
+            if r == "xcomp":
+                assert idx2semantic[h] == "P" and idx2semantic[d] == "P", f"Expected P→P for xcomp, got {idx2semantic[h]}→{idx2semantic[d]}"
+                # ensure h has SOME entity→agent dependent
+                ag_idxs = [
+                    i for i in by_head[h]
+                    if semantic_edges[i][2]=="agent"
+                ]
+                if not ag_idxs:
+                    # no agent yet: find the best-conf entity under h
+                    cand_idxs = [
+                        i for i in by_head[h]
+                        if idx2semantic[semantic_edges[i][1]] == "E"
+                    ]
+                    if cand_idxs:
+                        # pick highest p for “agent”
+                        best_i = max(
+                            cand_idxs,
+                            key=lambda i: edge_probs[i].get("agent", 0.0)
+                        )
+                        # relabel it
+                        semantic_edges[best_i] = (
+                            semantic_edges[best_i][0],
+                            semantic_edges[best_i][1],
+                            "agent"
+                        )
+                    else:
+                        # nothing to attach, skip
+                        continue
+
+                # now choose the same entity under h (or the one we just fixed)
+                agent_edge = next(
+                    i for i in by_head[h]
+                    if semantic_edges[i][2]=="agent"
+                )
+                ent_node = semantic_edges[agent_edge][1]
+
+                # add new “agent” edge from d→ent_node
+                semantic_edges.append((d, ent_node, "agent"))
+
+        return semantic_edges
 
     def init_semantic_class(self, idx2output_token):
         idx2semantic = {}
@@ -547,6 +578,8 @@ class Solver(nn.Module):
             # 0: in, 1: on, 2: beside
             rel_dict = {0: 'in', 1: 'on', 2: 'beside'}
             chosen_rel = rel_dict[actions.argmax().item()]
+            probs = F.softmax(semantic_score, dim=-1)
+            probs_dict = {k: v.item() for k, v in zip(rel_dict.values(), probs)}
 
         # P2P classifier
         elif head_sem== 'P' and dep_sem== 'P':
@@ -564,6 +597,8 @@ class Solver(nn.Module):
             # 0: ccomp, 1: xcomp
             rel_dict = {0: 'ccomp', 1: 'xcomp'}
             chosen_rel = rel_dict[actions.argmax().item()]
+            probs = F.softmax(semantic_score, dim=-1)
+            probs_dict = {k: v.item() for k, v in zip(rel_dict.values(), probs)}
 
         # P2E classifier
         elif head_sem== 'P' and dep_sem == 'E':
@@ -581,6 +616,8 @@ class Solver(nn.Module):
             # 0: agent, 1: theme, 2: recipient
             rel_dict = {0: 'agent', 1: 'theme', 2: 'recipient'}
             chosen_rel = rel_dict[actions.argmax().item()]
+            probs = F.softmax(semantic_score, dim=-1)
+            probs_dict = {k: v.item() for k, v in zip(rel_dict.values(), probs)}
             
         # E2P classifier
         elif head_sem == 'E' and dep_sem== 'P':
@@ -588,11 +625,12 @@ class Solver(nn.Module):
             # we know its a relcl
             chosen_rel = 'relcl'
             cat_distr, gumbel_noise, actions = None, None, None
+            probs_dict = None
 
         else:
             raise ValueError(f"Invalid semantic class: {head_sem}, {dep_sem}")
 
-        return cat_distr, gumbel_noise, actions, chosen_rel
+        return cat_distr, gumbel_noise, actions, chosen_rel, probs_dict
 
 
     def _sample_action(self, cat_distr, mask, relaxed, tau_weights, straight_through, gumbel_noise):
@@ -684,6 +722,8 @@ class HRLModel(nn.Module):
         #position_embed = self.position_embedding(positions)
         x_embedding = self.embd_parser(x)# + position_embed
 
+        #assert not torch.isnan(x_embedding).any(), f"NaN detected in x_embedding: {x_embedding}"
+
 
         # we iterate over samples of the batch, and apply semantic composition
         for in_batch_idx in range(sample_num):
@@ -767,25 +807,31 @@ class HRLModel(nn.Module):
 
 
     def get_reward(self, pred_edges, gold_edges):
-        """ Calculate the reward for the generated logical form by comparing to the gold."""
-        len_gold = len(gold_edges)
-        pred_set = set(['|'.join(edge) for edge in pred_edges])
-        gold_set = set(['|'.join(edge) for edge in gold_edges])
+        # flatten into strings for easy set ops
+        gold_unlab = {f"{h}|{d}" for h,d,_ in gold_edges}
+        pred_unlab = {f"{h}|{d}" for h,d,_ in pred_edges}
+        gold_lab   = {f"{h}|{d}|{r}" for h,d,r in gold_edges}
+        pred_lab   = {f"{h}|{d}|{r}" for h,d,r in pred_edges}
 
-        pred_unlabelled_set = set(['|'.join(edge[:2]) for edge in pred_edges])
-        gold_unlabelled_set = set(['|'.join(edge[:2]) for edge in gold_edges])
+        # Unlabeled recall (UAS)
+        uas = len(pred_unlab & gold_unlab) / len(gold_unlab)
 
-        # composer reward is the fraction of correct pred edges out of the total number of gold edges
-        composer_reward = len(pred_unlabelled_set & gold_unlabelled_set) / (len_gold)
-        
-        # solver reward is the fraction of correct pred labels out of the matching edges 
-        # num_correct_labels / len(pred_unlabelled_set & gold_unlabelled_set)
-        good_edges = [[pred_edge, gold_edge] for pred_edge in pred_edges for gold_edge in gold_edges if pred_edge[:2] == gold_edge[:2]]
-        good_labels = sum(1 for pred_edge, gold_edge in good_edges if pred_edge[2] == gold_edge[2])
-        
-        solver_reward = good_labels / len(good_edges) if len(good_edges) > 0 else 0
-        
-        return composer_reward, solver_reward
+        # If you also want precision & F1:
+        precision_unlab = len(pred_unlab & gold_unlab) / len(pred_unlab) if pred_unlab else 0
+        f1_unlab = (2 * uas * precision_unlab / (uas + precision_unlab)
+                    if (uas + precision_unlab) > 0 else 0)
+
+        # Labeled recall (LAS)
+        las = len(pred_lab & gold_lab) / len(gold_lab)
+
+        # And if you want labeled precision & F1:
+        precision_lab = len(pred_lab & gold_lab) / len(pred_lab) if pred_lab else 0
+        f1_lab = (2 * las * precision_lab / (las + precision_lab)
+                if (las + precision_lab) > 0 else 0)
+
+        # Return uas as composer reward and las as solver reward
+        return uas, las
+
 
     def get_entity_chain(self, semantic):
         if semantic is None:

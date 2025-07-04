@@ -800,8 +800,8 @@ def test_model(args, task_name, logger):
 
 
 def prepare_arguments(checkpoint_folder, parser):
-    high_lr = 1.0   # 1.0
-    low_lr = 0.1     # 0.1
+    high_lr = 0.5   # 1.0
+    low_lr = 0.05     # 0.1
     accumulate_batch_size = 8
     regular_weight = 1e-1   # 1e-1
     regular_decay_rate = 0.5
@@ -815,7 +815,7 @@ def prepare_arguments(checkpoint_folder, parser):
             "composer-trans-hidden": hidden_size,
             "var-normalization": "True",
             "regular-weight": regular_weight,  # 0.0001
-            "clip-grad-norm": 0.3, #CHANGE!!! 
+            "clip-grad-norm": 0.3,
             "env-optimizer": "adadelta",  # adadelta
             "pol-optimizer": "adadelta",  # adadelta
             "high-lr": high_lr,  # 1.

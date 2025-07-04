@@ -18,14 +18,14 @@ class BinaryTreeLstmCell(nn.Module):
         nn.init.constant_(self.linear.bias[2 * self.h_dim:4 * self.h_dim], val=1)
 
     def forward(self, h_l, c_l, h_r, c_r):
-        if not torch.isfinite(h_l).all():
-            raise RuntimeError(f"NaN/Inf in left hidden: min={h_l.min()}, max={h_l.max()}")
-        if not torch.isfinite(c_l).all():
-            raise RuntimeError(f"NaN/Inf in left cell:  min={c_l.min()}, max={c_l.max()}")
-        if not torch.isfinite(h_r).all():
-            raise RuntimeError(f"NaN/Inf in right hidden: min={h_r.min()}, max={h_r.max()}")
-        if not torch.isfinite(c_r).all():
-            raise RuntimeError(f"NaN/Inf in right cell:  min={c_r.min()}, max={c_r.max()}")
+        #if not torch.isfinite(h_l).all():
+        #    raise RuntimeError(f"NaN/Inf in left hidden: min={h_l.min()}, max={h_l.max()}")
+        #if not torch.isfinite(c_l).all():
+        #    raise RuntimeError(f"NaN/Inf in left cell:  min={c_l.min()}, max={c_l.max()}")
+        #if not torch.isfinite(h_r).all():
+        #    raise RuntimeError(f"NaN/Inf in right hidden: min={h_r.min()}, max={h_r.max()}")
+        #if not torch.isfinite(c_r).all():
+        #    raise RuntimeError(f"NaN/Inf in right cell:  min={c_r.min()}, max={c_r.max()}")
 
         h_lr = torch.cat([h_l, h_r], dim=-1)
         g, i, f_l, f_r, o = self.linear(h_lr).chunk(chunks=5, dim=-1)
@@ -34,5 +34,10 @@ class BinaryTreeLstmCell(nn.Module):
             c = i * self.dropout(g) + f_l * c_l + f_r * c_r
         else:
             c = i * g + f_l * c_l + f_r * c_r
-        h = o * c.tanh_()
+        h = o * c.tanh()
+        #if not torch.isfinite(h).all() or not torch.isfinite(c).all():
+        #    print("problem in TreeLSTM: h range", h.min(), h.max(),
+        #        "c range", c.min(), c.max())
+        #    raise RuntimeError("NaN/Inf produced inside TreeLSTMCell")
+
         return h, c
