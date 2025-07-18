@@ -68,12 +68,7 @@ class DepTreeComposer(BinaryTreeBasedModule):
                  straight_through=False):
         super().__init__(input_dim, hidden_dim, leaf_transformation, 
                          composer_trans_hidden, dropout_prob)
-
-        self.arc_scorer = nn.Sequential(
-            nn.Linear(2 * hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
+        self.q = nn.Parameter(torch.randn(hidden_dim) * 0.01)
 
         self.hidden_dim = hidden_dim
         self.tau_weights = tau_weights
@@ -83,11 +78,7 @@ class DepTreeComposer(BinaryTreeBasedModule):
 
     def reset_parameters(self):
         super().reset_parameters()
-        for layer in self.arc_scorer:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight)
-                nn.init.constant_(layer.bias, 0.0)
-
+        nn.init.normal_(self.q, mean=0.0, std=0.01)
 
     def _find(self, i):
         # path-compression
@@ -226,11 +217,7 @@ class DepTreeComposer(BinaryTreeBasedModule):
         new_h = new_h.view(B, B, D)
         new_c = new_c.view(B, B, D)
 
-        # Score all head→dep arcs
-        arc_features = torch.cat([head_h, dep_h], dim=-1)  # (B, B, 2D)
-        score = self.arc_scorer(arc_features).squeeze(-1)  # (B, B)
-        #if torch.isnan(score).any():
-        #    raise RuntimeError("NaN detected in arc scores: \n score={score}")
+        score = torch.matmul(new_h, self.q)
 
         # Mask invalid arcs: prevent attaching to already attached deps
         arc_mask = torch.ones_like(score, dtype=torch.float32, device=device)
@@ -368,13 +355,8 @@ class Solver(nn.Module):
         # Example tree: [(8, 2), (8, 3), (8, 5), (1, 8)]
         # Example idx2semantic: {"1": E("cake"), "3": P("cook")}
 
-        # Find the root index: the only index that does not appear as a dependent
-        #print(f"head_dep_idx: {head_dep_idx}")
-        #root_idx = set(head for head, _ in head_dep_idx) - set(dep for _, dep in head_dep_idx)
-        #print(f"Root index: {root_idx}")
-        #assert len(root_idx) == 1, f"Expected exactly one root, got {root_idx} from {head_dep_idx}"
-        #root_idx = list(root_idx)[0]
-        #debug_info["root_idx"] = root_idx
+        # dictionary comprehension where each head in head_dep_idx is a key, and the value is empty
+        head2rel = {str(head): [] for head, _ in head_dep_idx}
 
         for head, dep in head_dep_idx:
             # get semantic class of the head and dependent
@@ -388,9 +370,11 @@ class Solver(nn.Module):
             semantic_input = torch.cat([head_contextual, dep_contextual], dim=-1)
             
 
-            cat_distr, _, actions_i, chosen_rel, probs = self.semantic_merge(head_sem, dep_sem, semantic_input) 
+            cat_distr, _, actions_i, chosen_rel, probs = self.semantic_merge(head_sem, dep_sem, semantic_input, head2rel[str(head)]) 
 
             semantic_edges.append((str(head), str(dep), chosen_rel))
+            if chosen_rel in ["agent", "theme", "recipient"]:
+                head2rel[str(head)].append(chosen_rel)
             edge_probs.append(probs)
 
             #print(f"Semantic edges so far: {semantic_edges}")
@@ -400,7 +384,7 @@ class Solver(nn.Module):
                 semantic_normalized_entropy.append(cat_distr.normalized_entropy)
                 semantic_log_prob.append( cat_distr.log_prob(actions_i))
 
-        debug_info["pre_semantic_edges"] = semantic_edges
+        debug_info["pre_semantic_edges"] = copy.deepcopy(semantic_edges)
 
         # calculate the normalized entropy and log probability of the actions taken for RL
         if len(semantic_normalized_entropy) == 0:
@@ -412,7 +396,10 @@ class Solver(nn.Module):
             normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
             semantic_log_prob  = sum(semantic_log_prob)
 
-        semantic_edges = self._post_process(semantic_edges, edge_probs, idx2contextual, idx2semantic)
+        if pair[0] == 'who handed a cake to emma ?':
+            semantic_edges = self._post_process(semantic_edges, edge_probs, idx2contextual, idx2semantic, debug=True)
+        else:
+            semantic_edges = self._post_process(semantic_edges, edge_probs, idx2contextual, idx2semantic)
         debug_info["semantic_edges"] = semantic_edges
 
         rl_info = {
@@ -422,52 +409,13 @@ class Solver(nn.Module):
                       
         return semantic_edges, rl_info, debug_info
 
-    def _post_process(self, semantic_edges, edge_probs, idx2contextual, idx2semantic):
-
-        # index edges by head
-        by_head = defaultdict(list)
-        for idx, (h, d, r) in enumerate(semantic_edges):
-            by_head[h].append(idx)
-
-        # RULE 1
-        # For each predicate head with >1 dependents of the same rel, we keep the one with the highest probability
-        for h, edge_idxs in by_head.items():
-            if idx2semantic[h] != "P": 
-                continue
-
-            # collect only deps that are entities
-            ent_edges = [i for i in edge_idxs
-                         if idx2semantic[semantic_edges[i][1] ] == "E"]
-            # group by current rel label
-            rel_groups = defaultdict(list)
-            for i in ent_edges:
-                rel = semantic_edges[i][2]
-                rel_groups[rel].append(i)
-
-            # if any group has >1, resolve duplicates
-            for rel, idx_list in rel_groups.items():
-                if len(idx_list) <= 1: 
-                    continue
-                # we have a clash: multiple edges with the same rel
-                # for all but the TOP-1 under THIS rel, reassign them
-                sorted_by_conf = sorted(
-                    idx_list,
-                    key=lambda i: edge_probs[i][rel],
-                    reverse=True
-                )
-                # keep the first as is; fix all the rest
-                for i in sorted_by_conf[1:]:
-                    # find the best REL (≠ current rel) with max p
-                    best_rel, best_p = max(
-                        ((r2, p2) for r2, p2 in edge_probs[i].items()
-                                  if r2 != rel),
-                        key=lambda x: x[1]
-                    )
-                    semantic_edges[i] = (
-                        semantic_edges[i][0],  # head
-                        semantic_edges[i][1],  # dep
-                        best_rel
-                    )
+    def _post_process(self, semantic_edges, edge_probs, idx2contextual, idx2semantic, debug=False):
+        
+        if debug:
+            print(f"Semantic edges before post-processing: {semantic_edges}")
+            print(f"Edge probabilities: {edge_probs}")
+            print(f"Contextual embeddings shape: {len(idx2contextual)}")
+            print(f"Semantic classes: {idx2semantic}")
 
         # RULE 2
         # entity head with predicate dep (so current rel must be “relcl”)
@@ -494,6 +442,10 @@ class Solver(nn.Module):
         by_head = defaultdict(list)
         for idx, (h, d, r) in enumerate(semantic_edges):
             by_head[h].append(idx)
+
+        if debug:
+            print(f"By head: {by_head}")
+            print(f"Semantic edges after RULE 2: {semantic_edges}")
 
         # RULE 3
         # xcomp from pred to pred
@@ -536,6 +488,8 @@ class Solver(nn.Module):
 
                 # add new “agent” edge from d→ent_node
                 semantic_edges.append((d, ent_node, "agent"))
+        if debug:
+            print(f"Semantic edges after RULE 3: {semantic_edges}")
 
         return semantic_edges
 
@@ -556,7 +510,7 @@ class Solver(nn.Module):
 
         return idx2semantic
 
-    def semantic_merge(self, head_sem, dep_sem, semantic_input):
+    def semantic_merge(self, head_sem, dep_sem, semantic_input, head2rel):
         """ Compose the two children into a parent semantic class. 
         
         This is done by selecting a semantic operation from the semantic classifier.
@@ -605,6 +559,14 @@ class Solver(nn.Module):
             semantic_score = self.semantic_P_E(semantic_input)
             #print(f"Softmax probs (P,E): {F.softmax(semantic_score, dim=-1)}")
             semantic_mask = torch.ones_like(semantic_score)
+            
+            # 0: agent, 1: theme, 2: recipient
+            rel_dict = {0: 'agent', 1: 'theme', 2: 'recipient'}
+            rel2idx = {v: k for k, v in rel_dict.items()}
+            for rel in head2rel:
+                semantic_mask[rel2idx[rel]] = 0.0  # mask out already assigned relations
+
+            semantic_score = semantic_score.masked_fill(semantic_mask == 0, -1e11)
 
             cat_distr = Categorical(semantic_score, semantic_mask)
             actions, gumbel_noise = self._sample_action(cat_distr, #
@@ -613,8 +575,6 @@ class Solver(nn.Module):
                                                     self.tau_weights,
                                                     self.straight_through,
                                                     self.gumbel_noise)
-            # 0: agent, 1: theme, 2: recipient
-            rel_dict = {0: 'agent', 1: 'theme', 2: 'recipient'}
             chosen_rel = rel_dict[actions.argmax().item()]
             probs = F.softmax(semantic_score, dim=-1)
             probs_dict = {k: v.item() for k, v in zip(rel_dict.values(), probs)}
@@ -667,8 +627,19 @@ class HRLModel(nn.Module):
         self.entity_list = entity_list
         self.caus_predicate_list = caus_predicate_list
         self.unac_predicate_list = unac_predicate_list
-        self.embd_parser = nn.Embedding(vocab_size, word_dim)
+        self.entity_set    = set(entity_list)
+        self.predicate_set = set(self.caus_predicate_list + self.unac_predicate_list)
+
+        
+        self.ABS_ENTITY_ID = vocab_size
+        self.ABS_PREDICATE_ID = vocab_size + 1
+        self.abstract = False
+        if self.abstract:
+            self.embd_parser = nn.Embedding(vocab_size+2, word_dim)
+        else:
+            self.embd_parser = nn.Embedding(vocab_size, word_dim)
         #self.position_embedding = nn.Embedding(100, word_dim)
+
 
         self.abstractor = BottomAbstrator(alignments_idx)
         self.classifier = BottomClassifier(output_lang, alignments_idx)
@@ -711,16 +682,27 @@ class HRLModel(nn.Module):
         idx2output_token = self.classifier(x, bottom_idx)
         # [[1, "cake"], [3, "cook"], [6, "scientist"]]
 
-        # repeat sample_num (10) times to explore different trees
-        #bottom_idx_batch = [bottom_idx for _ in range(sample_num)]
-        #idx2output_token_batch = [idx2output_token for _ in range(sample_num)]
-
         batch_forward_info = []
         
-        # Get embeddings
-        #positions = torch.arange(len(x), device=x.device)
-        #position_embed = self.position_embedding(positions)
-        x_embedding = self.embd_parser(x)# + position_embed
+        if self.abstract:
+            # abstract embeddings
+            entity_mask    = torch.zeros_like(x, dtype=torch.bool)
+            predicate_mask = torch.zeros_like(x, dtype=torch.bool)
+
+            for pos, tok_str in idx2output_token:
+                if tok_str in self.entity_set:
+                    entity_mask[pos] = True
+                elif tok_str in self.predicate_set:
+                    predicate_mask[pos] = True
+
+            x_mod = x.clone()
+            x_mod[entity_mask]    = self.ABS_ENTITY_ID
+            x_mod[predicate_mask] = self.ABS_PREDICATE_ID
+
+            # Get embeddings
+            x_embedding = self.embd_parser(x_mod)
+        else:
+            x_embedding = self.embd_parser(x)
 
         #assert not torch.isnan(x_embedding).any(), f"NaN detected in x_embedding: {x_embedding}"
 
@@ -774,15 +756,6 @@ class HRLModel(nn.Module):
             #print(f"Reward: {reward}")
             batch_forward_info.append([composer_rl_info, solver_rl_info])
 
-            '''
-            if pair[0] == 'a visitor gave a cookie to the girl that emma rolled':
-                import pickle
-                with open("debug_info.pkl", "wb") as f:
-                    pickle.dump(span2semantic[str(end_span)], f)
-                print("Saved debug info")
-                print(pred_chain)
-                quit()
-            '''   
 
             #print(debug_info["composer"])
             #print(debug_info["solver"])
@@ -795,6 +768,7 @@ class HRLModel(nn.Module):
             "bottom_idx": bottom_idx,
             #"comp_heads": debug_info["composer"]["heads"],
             #"head_dep_edges": debug_info["solver"]["sorted_head_dep_idx"],
+            "pre_semantic_edges": debug_info["solver"]["pre_semantic_edges"],
             "pred_edges": pred_edges,
             "gold_edges": gold_edges,
             "pair": pair,

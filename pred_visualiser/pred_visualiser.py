@@ -104,7 +104,7 @@ def load_file(filename):
                     # New format: front-end will draw edges directly
                     rec.update({
                         "gold": parsed_row.get("pair", ["", ""])[1],
-                        "correct": parsed_row.get("comp reward", 0.0) == 1.0,
+                        "correct": parsed_row.get("comp reward", 0.0) == 1.0 and parsed_row.get("solv reward", 0.0) == 1.0,
                         # leave these empty so old renderers won’t run
                         "tree": {},
                         "sem_tree": {},

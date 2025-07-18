@@ -525,9 +525,7 @@ class BottomUpTreeComposer(BinaryTreeBasedModule):
             var_normalized_entropy.append(var_cat_distr.normalized_entropy * reduce_mask)
             var_log_prob.append(-var_cat_distr.log_prob(var_actions) * reduce_mask)
 
-            print(f"Merges: {parent_child_spans_batch[0]}")
-            print(f"span_start_end: {span_start_end_batch[0]}")
-        quit()
+
         log_prob = sum(log_prob) + sum(var_log_prob)
 
         normalized_entropy = (sum(normalized_entropy) + sum(var_normalized_entropy)) / (

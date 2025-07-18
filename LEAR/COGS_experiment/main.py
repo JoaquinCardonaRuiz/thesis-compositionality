@@ -445,7 +445,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         accuracy_samples = []
         rewards_all = []
 
-        sample_num = 25
+        sample_num = 10
 
         for example_idx in range(batch_size):
             train_pair = train_pairs[example_idx]
@@ -776,7 +776,7 @@ def test_model(args, task_name, logger):
 def prepare_arguments(checkpoint_folder, parser):
     high_lr = 1.0   # 1.0
     low_lr = 0.1     # 0.1
-    accumulate_batch_size = 8
+    accumulate_batch_size = 1
     regular_weight = 1e-1   # 1e-1
     regular_decay_rate = 0.5
     simplicity_reward_rate = 0.5
@@ -796,9 +796,9 @@ def prepare_arguments(checkpoint_folder, parser):
             "low-lr": low_lr,  # 0.1
             "epsilon": 0.2,
             "l2-weight": 0.0001,
-            "batch-size": 8,
+            "batch-size": 1,
             "accumulate-batch-size": accumulate_batch_size,
-            "max-epoch": 30,
+            "max-epoch": 1,
             "gpu-id": 0,
             "model-dir": "checkpoint/models/" + checkpoint_folder,
             "train-logs-path": "checkpoint/logs/train/" + checkpoint_folder,

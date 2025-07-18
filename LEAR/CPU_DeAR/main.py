@@ -806,7 +806,7 @@ def prepare_arguments(checkpoint_folder, parser):
     regular_weight = 1e-1   # 1e-1
     regular_decay_rate = 0.5
     simplicity_reward_rate = 0.5
-    hidden_size = 128
+    hidden_size = 256
     encode_mode = 'seq'
 
     args = {"word-dim": hidden_size,
