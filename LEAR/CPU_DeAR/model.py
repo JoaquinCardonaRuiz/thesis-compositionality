@@ -335,6 +335,15 @@ class Solver(nn.Module):
 
 
     def forward(self, pair, head_dep_idx, idx2contextual, idx2output_token):
+        debug = False
+
+        if debug:
+            token_dict = {k: v for k, v in idx2output_token}
+            print(f"Processing pair: {pair}")
+            print(f"Head-dep indices: {head_dep_idx}")
+            print(f"Idx to output token: {idx2output_token}")
+            print(f"Head-dep mapped to tokens: {[(token_dict[i[0]], token_dict[i[1]]) for i in head_dep_idx]}")
+
         debug_info = {}
 
         # returns either E or P instances depending of whether the token is on the entity or predicate list
@@ -369,7 +378,6 @@ class Solver(nn.Module):
             #print(f"head norm: {head_contextual.norm().item()}, dep norm: {dep_contextual.norm().item()}")
             semantic_input = torch.cat([head_contextual, dep_contextual], dim=-1)
             
-
             cat_distr, _, actions_i, chosen_rel, probs = self.semantic_merge(head_sem, dep_sem, semantic_input, head2rel[str(head)]) 
 
             semantic_edges.append((str(head), str(dep), chosen_rel))
@@ -384,6 +392,10 @@ class Solver(nn.Module):
                 semantic_normalized_entropy.append(cat_distr.normalized_entropy)
                 semantic_log_prob.append( cat_distr.log_prob(actions_i))
 
+            if debug:
+                print(f"Head: {token_dict[head]}, Dep: {token_dict[dep]}, Chosen relation: {chosen_rel}")
+                
+
         debug_info["pre_semantic_edges"] = copy.deepcopy(semantic_edges)
 
         # calculate the normalized entropy and log probability of the actions taken for RL
@@ -396,10 +408,7 @@ class Solver(nn.Module):
             normalized_entropy = sum(semantic_normalized_entropy) / len(semantic_normalized_entropy)
             semantic_log_prob  = sum(semantic_log_prob)
 
-        if pair[0] == 'who handed a cake to emma ?':
-            semantic_edges = self._post_process(semantic_edges, edge_probs, idx2contextual, idx2semantic, debug=True)
-        else:
-            semantic_edges = self._post_process(semantic_edges, edge_probs, idx2contextual, idx2semantic)
+        semantic_edges = self._post_process(semantic_edges, edge_probs, idx2contextual, idx2semantic, debug)
         debug_info["semantic_edges"] = semantic_edges
 
         rl_info = {
@@ -419,26 +428,49 @@ class Solver(nn.Module):
 
         # RULE 2
         # entity head with predicate dep (so current rel must be “relcl”)
-        for idx, (h, d, r) in enumerate(list(semantic_edges)):
-            if idx2semantic[h] == "E" and idx2semantic[d] == "P":
-                assert r == "relcl", f"Expected relcl, got {r} for edge with semantics {idx2semantic[h]}→{idx2semantic[d]}"
-                # add a new opposite edge (predicate→entity)
-                # classify with P_E classifier (mask out “recipient”)
-                semantic_input = torch.cat([idx2contextual[h], idx2contextual[d]], dim=-1)
-                pe_logits = self.semantic_P_E(semantic_input)
-                # mask out the 'recipient' class (index 2)
-                neg_inf = torch.finfo(pe_logits.dtype).min
-                # make a mask: [1,1,0] → log-mask = [0,0,-inf]
-                mask = pe_logits.new_tensor([1.0, 1.0, 0.0])
-                pe_logits = pe_logits + (mask.log() * neg_inf)
-                pe_probs = F.softmax(pe_logits, dim=-1)
-                # now only agent/theme compete
-                # pick between indices 0 and 1
-                chosen_idx = pe_probs[:2].argmax().item()
-                pe_rels = ["agent", "theme"]
-                chosen = pe_rels[chosen_idx]
-                semantic_edges.append((d, h, chosen))
-        
+        if not self.training:
+            for idx, (h, d, r) in enumerate(list(semantic_edges)):
+                if idx2semantic[h] == "E" and idx2semantic[d] == "P":
+                    assert r == "relcl", f"Expected relcl, got {r} for edge with semantics {idx2semantic[h]}→{idx2semantic[d]}"
+                    # add a new opposite edge (predicate→entity)
+                    semantic_input = torch.cat([idx2contextual[h], idx2contextual[d]], dim=-1)
+                    pe_logits = self.semantic_P_E(semantic_input)
+
+                    # --- DYNAMIC MASK: mask out any relations d already has ---
+                    pe_rels = ["agent","theme","recipient"]
+                    neg_inf = torch.finfo(pe_logits.dtype).min
+
+                    # collect existing P→E relations for this predicate
+                    existing_rels = [rel for (h2,d2,rel) in semantic_edges if h2==d and rel in pe_rels]
+                    forbidden_idxs = [pe_rels.index(rel) for rel in existing_rels]
+
+                    # zero out all by default
+                    # then assign –∞ to forbidden entries
+                    clean_logits = pe_logits.clone()
+                    for i in forbidden_idxs:
+                        clean_logits[i] = neg_inf
+
+                    pe_probs = F.softmax(clean_logits, dim=-1)
+                    chosen_idx = pe_probs.argmax().item()
+                    chosen = pe_rels[chosen_idx]
+
+
+                    if debug:
+                        print(f"Existing relations for {d}→E: {existing_rels}")
+                        print(f"Forbidden idxs: {forbidden_idxs}")
+                        print(f"PE logits before masking: {pe_logits}")
+                        print(f"PE logits after masking: {clean_logits}")
+                        print(f"PE probabilities: {pe_probs}")
+                        print(f"Chosen relation index for {d}→E: {chosen_idx}")
+                        print(f"Chosen relation for {d}→E: {chosen}")
+
+                    semantic_edges.append((d, h, chosen))
+                    edge_probs.append({
+                        "agent":  pe_probs[0].item(),
+                        "theme":  pe_probs[1].item(),
+                        "recipient": pe_probs[2].item()
+                    })
+            
         by_head = defaultdict(list)
         for idx, (h, d, r) in enumerate(semantic_edges):
             by_head[h].append(idx)
@@ -536,7 +568,7 @@ class Solver(nn.Module):
             probs_dict = {k: v.item() for k, v in zip(rel_dict.values(), probs)}
 
         # P2P classifier
-        elif head_sem== 'P' and dep_sem== 'P':
+        elif head_sem == 'P' and dep_sem== 'P':
             semantic_score = self.semantic_P_P(semantic_input)
             #print(f"Softmax probs (P,P): {F.softmax(semantic_score, dim=-1)}")
             semantic_mask = torch.ones_like(semantic_score)
@@ -555,7 +587,7 @@ class Solver(nn.Module):
             probs_dict = {k: v.item() for k, v in zip(rel_dict.values(), probs)}
 
         # P2E classifier
-        elif head_sem== 'P' and dep_sem == 'E':
+        elif head_sem == 'P' and dep_sem == 'E':
             semantic_score = self.semantic_P_E(semantic_input)
             #print(f"Softmax probs (P,E): {F.softmax(semantic_score, dim=-1)}")
             semantic_mask = torch.ones_like(semantic_score)
@@ -563,10 +595,11 @@ class Solver(nn.Module):
             # 0: agent, 1: theme, 2: recipient
             rel_dict = {0: 'agent', 1: 'theme', 2: 'recipient'}
             rel2idx = {v: k for k, v in rel_dict.items()}
-            for rel in head2rel:
-                semantic_mask[rel2idx[rel]] = 0.0  # mask out already assigned relations
-
-            semantic_score = semantic_score.masked_fill(semantic_mask == 0, -1e11)
+            
+            if not self.training:
+                for rel in head2rel:
+                    semantic_mask[rel2idx[rel]] = 0.0  # mask out already assigned relations
+                semantic_score = semantic_score.masked_fill(semantic_mask == 0, -1e11)
 
             cat_distr = Categorical(semantic_score, semantic_mask)
             actions, gumbel_noise = self._sample_action(cat_distr, #
@@ -667,7 +700,8 @@ class HRLModel(nn.Module):
     def forward(self, pair, x, sample_num, is_test=False, epoch=None):
         self.is_test = is_test
         batch_forward_info, pred_chain, label_chain, state = self._forward(
-            pair, x, sample_num, epoch, is_test)
+            pair, x, sample_num, epoch, is_test
+        )
         return batch_forward_info, pred_chain, label_chain, state
 
     def _forward(self, pair, x, sample_num, epoch, is_test):
@@ -720,13 +754,13 @@ class HRLModel(nn.Module):
             '''
             edges, idx2contextual, composer_rl_info = self.composer(x_embedding, bottom_idx)
 
-
-            # the solvers walks the tree bottom up, applies semantic composition rules, and generates a logical form
-            #print(bottom_idx)
-            semantic_edges, solver_rl_info, debug_info["solver"] = self.solver(pair, 
-                                                                        edges, 
-                                                                        idx2contextual, 
-                                                                        idx2output_token)
+            semantic_edges, solver_rl_info, debug_info["solver"] = self.solver(
+                pair,
+                edges,
+                idx2contextual,
+                idx2output_token
+            )
+            
             #print(semantic_edges)
             #total_log_prob = composer_rl_info["log_prob"] + solver_rl_info["log_prob"]
             #total_entropy = composer_rl_info["normalized_entropy"] + solver_rl_info["normalized_entropy"]
@@ -782,48 +816,23 @@ class HRLModel(nn.Module):
 
     def get_reward(self, pred_edges, gold_edges):
         # flatten into strings for easy set ops
-        gold_unlab = {f"{h}|{d}" for h,d,_ in gold_edges}
-        pred_unlab = {f"{h}|{d}" for h,d,_ in pred_edges}
-        gold_lab   = {f"{h}|{d}|{r}" for h,d,r in gold_edges}
-        pred_lab   = {f"{h}|{d}|{r}" for h,d,r in pred_edges}
+        gold_unlab = {f"{h}|{d}" for h, d, _ in gold_edges}
+        pred_unlab = {f"{h}|{d}" for h, d, _ in pred_edges}
+        gold_lab = {f"{h}|{d}|{r}" for h, d, r in gold_edges}
+        pred_lab = {f"{h}|{d}|{r}" for h, d, r in pred_edges}
 
-        # Unlabeled recall (UAS)
-        uas = len(pred_unlab & gold_unlab) / len(gold_unlab)
+        # For composer: precision, recall, and F1 over unlabelled edges
+        correct_unlab = pred_unlab & gold_unlab
+        prec = len(correct_unlab) / len(pred_unlab) if pred_unlab else 0
+        rec = len(correct_unlab) / len(gold_unlab) if gold_unlab else 0
+        comp_f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
 
-        # If you also want precision & F1:
-        precision_unlab = len(pred_unlab & gold_unlab) / len(pred_unlab) if pred_unlab else 0
-        f1_unlab = (2 * uas * precision_unlab / (uas + precision_unlab)
-                    if (uas + precision_unlab) > 0 else 0)
+        # For solver: accuracy of labels *on correctly predicted edges only*
+        correct_lab = pred_lab & gold_lab
+        solv_reward = len(correct_lab) / len(correct_unlab) if correct_unlab else 0
 
-        # Labeled recall (LAS)
-        las = len(pred_lab & gold_lab) / len(gold_lab)
-
-        # And if you want labeled precision & F1:
-        precision_lab = len(pred_lab & gold_lab) / len(pred_lab) if pred_lab else 0
-        f1_lab = (2 * las * precision_lab / (las + precision_lab)
-                if (las + precision_lab) > 0 else 0)
-
-        # Return uas as composer reward and las as solver reward
-        return uas, las
-
-
-    def get_entity_chain(self, semantic):
-        if semantic is None:
-            return ['None']
-
-        assert isinstance(semantic, E)
-        flat_chain = []
-        # [in_word / on_word / beside_word, agent_word / theme_word / recipient_word, entity]
-        for entity_idx, entity_info in enumerate(semantic.entity_chain):
-            if entity_idx == 0:
-                flat_entity_chain = [entity_info[2]]
-            else:
-                assert entity_info[0] is not None
-                flat_entity_chain = [entity_info[0], entity_info[2]]
-            flat_chain = flat_chain + flat_entity_chain
-
-        return flat_chain
-
+        return comp_f1, solv_reward
+    
     def action_info_dict(self, action_info):
         action_info_dict = {
             "embed_type": action_info[0],
