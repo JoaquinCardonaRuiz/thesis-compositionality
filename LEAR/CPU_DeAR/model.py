@@ -428,49 +428,48 @@ class Solver(nn.Module):
 
         # RULE 2
         # entity head with predicate dep (so current rel must be “relcl”)
-        if not self.training:
-            for idx, (h, d, r) in enumerate(list(semantic_edges)):
-                if idx2semantic[h] == "E" and idx2semantic[d] == "P":
-                    assert r == "relcl", f"Expected relcl, got {r} for edge with semantics {idx2semantic[h]}→{idx2semantic[d]}"
-                    # add a new opposite edge (predicate→entity)
-                    semantic_input = torch.cat([idx2contextual[h], idx2contextual[d]], dim=-1)
-                    pe_logits = self.semantic_P_E(semantic_input)
+        for idx, (h, d, r) in enumerate(list(semantic_edges)):
+            if idx2semantic[h] == "E" and idx2semantic[d] == "P":
+                assert r == "relcl", f"Expected relcl, got {r} for edge with semantics {idx2semantic[h]}→{idx2semantic[d]}"
+                # add a new opposite edge (predicate→entity)
+                semantic_input = torch.cat([idx2contextual[h], idx2contextual[d]], dim=-1)
+                pe_logits = self.semantic_P_E(semantic_input)
 
-                    # --- DYNAMIC MASK: mask out any relations d already has ---
-                    pe_rels = ["agent","theme","recipient"]
-                    neg_inf = torch.finfo(pe_logits.dtype).min
+                # --- DYNAMIC MASK: mask out any relations d already has ---
+                pe_rels = ["agent","theme","recipient"]
+                neg_inf = torch.finfo(pe_logits.dtype).min
 
-                    # collect existing P→E relations for this predicate
-                    existing_rels = [rel for (h2,d2,rel) in semantic_edges if h2==d and rel in pe_rels]
-                    forbidden_idxs = [pe_rels.index(rel) for rel in existing_rels]
+                # collect existing P→E relations for this predicate
+                existing_rels = [rel for (h2,d2,rel) in semantic_edges if h2==d and rel in pe_rels]
+                forbidden_idxs = [pe_rels.index(rel) for rel in existing_rels]
 
-                    # zero out all by default
-                    # then assign –∞ to forbidden entries
-                    clean_logits = pe_logits.clone()
-                    for i in forbidden_idxs:
-                        clean_logits[i] = neg_inf
+                # zero out all by default
+                # then assign –∞ to forbidden entries
+                clean_logits = pe_logits.clone()
+                for i in forbidden_idxs:
+                    clean_logits[i] = neg_inf
 
-                    pe_probs = F.softmax(clean_logits, dim=-1)
-                    chosen_idx = pe_probs.argmax().item()
-                    chosen = pe_rels[chosen_idx]
+                pe_probs = F.softmax(clean_logits, dim=-1)
+                chosen_idx = pe_probs.argmax().item()
+                chosen = pe_rels[chosen_idx]
 
 
-                    if debug:
-                        print(f"Existing relations for {d}→E: {existing_rels}")
-                        print(f"Forbidden idxs: {forbidden_idxs}")
-                        print(f"PE logits before masking: {pe_logits}")
-                        print(f"PE logits after masking: {clean_logits}")
-                        print(f"PE probabilities: {pe_probs}")
-                        print(f"Chosen relation index for {d}→E: {chosen_idx}")
-                        print(f"Chosen relation for {d}→E: {chosen}")
+                if debug:
+                    print(f"Existing relations for {d}→E: {existing_rels}")
+                    print(f"Forbidden idxs: {forbidden_idxs}")
+                    print(f"PE logits before masking: {pe_logits}")
+                    print(f"PE logits after masking: {clean_logits}")
+                    print(f"PE probabilities: {pe_probs}")
+                    print(f"Chosen relation index for {d}→E: {chosen_idx}")
+                    print(f"Chosen relation for {d}→E: {chosen}")
 
-                    semantic_edges.append((d, h, chosen))
-                    edge_probs.append({
-                        "agent":  pe_probs[0].item(),
-                        "theme":  pe_probs[1].item(),
-                        "recipient": pe_probs[2].item()
-                    })
-            
+                semantic_edges.append((d, h, chosen))
+                edge_probs.append({
+                    "agent":  pe_probs[0].item(),
+                    "theme":  pe_probs[1].item(),
+                    "recipient": pe_probs[2].item()
+                })
+        
         by_head = defaultdict(list)
         for idx, (h, d, r) in enumerate(semantic_edges):
             by_head[h].append(idx)
@@ -595,11 +594,10 @@ class Solver(nn.Module):
             # 0: agent, 1: theme, 2: recipient
             rel_dict = {0: 'agent', 1: 'theme', 2: 'recipient'}
             rel2idx = {v: k for k, v in rel_dict.items()}
-            
-            if not self.training:
-                for rel in head2rel:
-                    semantic_mask[rel2idx[rel]] = 0.0  # mask out already assigned relations
-                semantic_score = semantic_score.masked_fill(semantic_mask == 0, -1e11)
+            for rel in head2rel:
+                semantic_mask[rel2idx[rel]] = 0.0  # mask out already assigned relations
+
+            semantic_score = semantic_score.masked_fill(semantic_mask == 0, -1e11)
 
             cat_distr = Categorical(semantic_score, semantic_mask)
             actions, gumbel_noise = self._sample_action(cat_distr, #
@@ -666,13 +664,8 @@ class HRLModel(nn.Module):
         
         self.ABS_ENTITY_ID = vocab_size
         self.ABS_PREDICATE_ID = vocab_size + 1
-        self.abstract = False
-        if self.abstract:
-            self.embd_parser = nn.Embedding(vocab_size+2, word_dim)
-        else:
-            self.embd_parser = nn.Embedding(vocab_size, word_dim)
+        self.embd_parser = nn.Embedding(vocab_size, word_dim)
         #self.position_embedding = nn.Embedding(100, word_dim)
-
 
         self.abstractor = BottomAbstrator(alignments_idx)
         self.classifier = BottomClassifier(output_lang, alignments_idx)
@@ -699,10 +692,10 @@ class HRLModel(nn.Module):
 
     def forward(self, pair, x, sample_num, is_test=False, epoch=None):
         self.is_test = is_test
-        batch_forward_info, pred_chain, label_chain, state = self._forward(
+        batch_forward_info, pred_chain, label_chain, state, batch_train_info = self._forward(
             pair, x, sample_num, epoch, is_test
         )
-        return batch_forward_info, pred_chain, label_chain, state
+        return batch_forward_info, pred_chain, label_chain, state, batch_train_info
 
     def _forward(self, pair, x, sample_num, epoch, is_test):
         debug_info = {}
@@ -717,29 +710,9 @@ class HRLModel(nn.Module):
         # [[1, "cake"], [3, "cook"], [6, "scientist"]]
 
         batch_forward_info = []
-        
-        if self.abstract:
-            # abstract embeddings
-            entity_mask    = torch.zeros_like(x, dtype=torch.bool)
-            predicate_mask = torch.zeros_like(x, dtype=torch.bool)
+        x_embedding = self.embd_parser(x)
 
-            for pos, tok_str in idx2output_token:
-                if tok_str in self.entity_set:
-                    entity_mask[pos] = True
-                elif tok_str in self.predicate_set:
-                    predicate_mask[pos] = True
-
-            x_mod = x.clone()
-            x_mod[entity_mask]    = self.ABS_ENTITY_ID
-            x_mod[predicate_mask] = self.ABS_PREDICATE_ID
-
-            # Get embeddings
-            x_embedding = self.embd_parser(x_mod)
-        else:
-            x_embedding = self.embd_parser(x)
-
-        #assert not torch.isnan(x_embedding).any(), f"NaN detected in x_embedding: {x_embedding}"
-
+        batch_train_info = []
 
         # we iterate over samples of the batch, and apply semantic composition
         for in_batch_idx in range(sample_num):
@@ -797,6 +770,21 @@ class HRLModel(nn.Module):
             #print(f"Gold edges: {gold_edges}")
             #print(f"Reward: {reward}")         
             #quit()
+            #record_training_info
+            
+            batch_train_info.append({
+                "input": pair[0],
+                "sentence_len": len(bottom_idx), 
+                "gold": pair[1],
+                "output": " ".join([f"{h}({d},{r})" for h,d,r in pred_edges]),
+                "processed_gold": " ".join([f"{h}({d},{r})" for h,d,r in gold_edges]),
+                "sample_num": in_batch_idx,
+                "c_reward": composer_rl_info['reward'],
+                "s_reward": solver_rl_info['reward'],
+                
+            })
+
+
         # pdb.set_trace()
         state = {
             "bottom_idx": bottom_idx,
@@ -811,7 +799,7 @@ class HRLModel(nn.Module):
         }
         #print(f"==========\n{state}\n")
         #quit()
-        return batch_forward_info, pred_edges, gold_edges, state
+        return batch_forward_info, pred_edges, gold_edges, state, batch_train_info
 
 
     def get_reward(self, pred_edges, gold_edges):

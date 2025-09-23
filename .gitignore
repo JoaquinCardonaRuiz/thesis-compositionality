@@ -16,6 +16,9 @@ LEAR/CPU_DeAR/modules/__pycache__
 LEAR/CPU_DeAR/cogs_data
 LEAR/CPU_DeAR/slog_data
 
+
+ACL/finetune_llama/data/*
+ACL/sparsity_test/*.tsv
 LEAR\Temp
 
 pred_visualiser/input_tsvs

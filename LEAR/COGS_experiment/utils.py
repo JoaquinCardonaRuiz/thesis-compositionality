@@ -200,6 +200,11 @@ class Logger():
         with open(f"{self.log_dir}{self.checkpoint_name}.tsv", 'a') as f:
             f.write(f"{state}\n")
 
+    def log_train(self, log_array):
+        with open(f"{self.log_dir}/{self.checkpoint_name}_train.tsv", 'a') as f:
+            for elem in log_array:
+                f.write(f"{elem}\n")
+
 
 def get_logger(file_name):
     logger = logging.getLogger("general_logger")

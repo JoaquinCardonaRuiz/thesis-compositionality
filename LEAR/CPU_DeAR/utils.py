@@ -136,14 +136,15 @@ class Logger():
             session = boto3.Session(profile_name="default")
 
         # One stream per run → easy retrieval later
-        cw_stream = f"{checkpoint_name}-{uuid.uuid4().hex[:8]}"
-        cw_handler = CloudWatchLogsHandler(cw_group, cw_stream, session)
-        cw_handler.setLevel(logging.INFO)
-        cw_handler.setFormatter(formatter)
-        self.logger.addHandler(cw_handler)
+        if cw_group:
+            cw_stream = f"{checkpoint_name}-{uuid.uuid4().hex[:8]}"
+            cw_handler = CloudWatchLogsHandler(cw_group, cw_stream, session)
+            cw_handler.setLevel(logging.INFO)
+            cw_handler.setFormatter(formatter)
+            self.logger.addHandler(cw_handler)
 
-        # Record where the CloudWatch data lives so you can print / store it
-        self.logger.info(f"CloudWatch stream: {cw_group}/{cw_stream}")
+            # Record where the CloudWatch data lives so you can print / store it
+            self.logger.info(f"CloudWatch stream: {cw_group}/{cw_stream}")
 
     
         self.logger.info("Logger initialized.")
@@ -154,6 +155,11 @@ class Logger():
     def log_state(self, state):
         with open(f"{self.log_dir}{self.checkpoint_name}.tsv", 'a') as f:
             f.write(f"{state}\n")
+
+    def log_train(self, log_array):
+        with open(f"{self.log_dir}/{self.checkpoint_name}_train.tsv", 'a') as f:
+            for elem in log_array:
+                f.write(f"{elem}\n")
 
 
 def get_logger(file_name):

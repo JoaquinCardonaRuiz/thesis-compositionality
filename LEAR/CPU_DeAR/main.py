@@ -181,7 +181,8 @@ def make_path_preparations(args, run_mode):
 
         # "thesis-bucket-jcardonaruiz"
         #print(f"Creating logger at {args.train_logs_path} | checkpoint: {args.checkpoint}")
-        _logger = Logger(args.train_logs_path, args.checkpoint, cw_group = "thesis-train-logs")
+        #_logger = Logger(args.train_logs_path, args.checkpoint, cw_group = "thesis-train-logs")
+        _logger = Logger(args.train_logs_path, args.checkpoint, cw_group = None)
         #_logger = get_logger(f"{args.logs_path}.log")
         #print(f"{args.logs_path}.log")
         _logger.info(f"random seed: {seed}")
@@ -197,7 +198,8 @@ def make_path_preparations(args, run_mode):
             os.makedirs(log_dir)
         
         #print(f"Creating logger at {log_dir} | checkpoint: {checkpoint_name}")
-        _logger = Logger(log_dir, checkpoint_name, cw_group = "thesis-test-logs")
+        #_logger = Logger(log_dir, checkpoint_name, cw_group = "thesis-test-logs")
+        _logger = Logger(log_dir, checkpoint_name, cw_group =None)
     return _logger
 
 def prepare_optimisers(args, logger, high_parameters, low_parameters):
@@ -269,7 +271,7 @@ def test(test_data, model, example2type, device, log_file=None):
             if USE_CUDA:
                 tokens = tokens.cuda()
             # pdb.set_trace()
-            batch_forward_info, pred_chain, label_chain, state = model(test_data_example, tokens, 1, is_test=True)
+            batch_forward_info, pred_chain, label_chain, state, _ = model(test_data_example, tokens, 1, is_test=True)
 
             # pdb.set_trace()
             composer_rl_info, solver_rl_info = batch_forward_info[0]
@@ -344,7 +346,7 @@ def validate(valid_data, model, epoch, device, logger):
 
             # print('--' * 20)
             # print(valid_data_example[0])
-            batch_forward_info, pred_chain, label_chain, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
+            batch_forward_info, pred_chain, label_chain, _, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
             composer_rl_info, solver_rl_info = batch_forward_info[0]
 
             """
@@ -450,7 +452,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         accuracy_samples = []
         rewards_all = []
 
-        sample_num = 15
+        sample_num = 10
 
         for example_idx in range(batch_size):
             train_pair = train_pairs[example_idx]
@@ -463,8 +465,10 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
             # pdb.set_trace()
             if USE_CUDA:
                 tokens = tokens.cuda()
-            batch_forward_info, pred_chain, label_chain, _ = \
+            batch_forward_info, pred_chain, label_chain, _, train_info = \
                 model(train_pair, tokens, sample_num, is_test=False, epoch=epoch)
+
+            logger.log_train(train_info)
 
             for forward_info in batch_forward_info:
                 composer_rl_info, solver_rl_info = forward_info
@@ -541,10 +545,10 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         global global_step
         global_step += 1
 
-        if batch_num <= 500:
+        if batch_num <= 250:
             val_num = batch_num
         else:
-            val_num = 500
+            val_num = 250
 
 
         print(f"Train: epoch: {epoch + 1} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
@@ -824,7 +828,7 @@ def prepare_arguments(checkpoint_folder, parser):
             "l2-weight": 0.0001,
             "batch-size": 8,
             "accumulate-batch-size": accumulate_batch_size,
-            "max-epoch": 30,
+            "max-epoch": 1,
             "gpu-id": 0,
             "model-dir": "checkpoint/models/" + checkpoint_folder,
             "train-logs-path": "checkpoint/logs/train/" + checkpoint_folder,

@@ -460,9 +460,11 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
             if USE_CUDA:
                 tokens = tokens.cuda()
 
-            batch_forward_info, pred_chain, label_chain, _ = \
+            batch_forward_info, pred_chain, label_chain, _, train_info = \
                 model(train_pair, tokens, sample_num, is_test=False, epoch=epoch)
 
+            logger.log_train(train_info)
+            
             for forward_info in batch_forward_info:
                 normalized_entropy, log_prob, reward = forward_info
 

@@ -1035,9 +1035,9 @@ class HRLModel(nn.Module):
 
     def forward(self, pair, x, sample_num, is_test=False, epoch=None, debug_info=None):
         self.is_test = is_test
-        batch_forward_info, pred_chain, label_chain, state = self._forward(
+        batch_forward_info, pred_chain, label_chain, state, train_info = self._forward(
             pair, x, sample_num, epoch, is_test, debug_info=debug_info)
-        return batch_forward_info, pred_chain, label_chain, state
+        return batch_forward_info, pred_chain, label_chain, state, train_info
 
     def _forward(self, pair, x, sample_num, epoch, is_test, debug_info):
         assert x.size(1) > 1
@@ -1065,6 +1065,7 @@ class HRLModel(nn.Module):
 
 
         batch_forward_info = []
+        batch_train_info  = []
 
         # we iterate over samples of the batch, and apply semantic composition
         for in_batch_idx in range(sample_num):
@@ -1112,6 +1113,18 @@ class HRLModel(nn.Module):
             log_prob = tree_log_prob[in_batch_idx] + \
                        semantic_log_prob
 
+            batch_train_info.append({
+                "input": pair[0],
+                "sentence_len": len(bottom_span), 
+                "gold": pair[1],
+                "output": pred_chain,
+                "processed_gold": label_chain,
+                "sample_num": in_batch_idx,
+                "composer_output": parent_child_spans,
+                'final_semantic': span2semantic[str(end_span)].json_repr,
+                "c_reward": -1.0,
+                "s_reward": -1.0,     
+            })
             batch_forward_info.append([normalized_entropy, log_prob, reward])
 
             '''
@@ -1138,7 +1151,7 @@ class HRLModel(nn.Module):
             "parent_json": span2semantic[str(end_span)].json_repr
         }
 
-        return batch_forward_info, pred_chain, label_chain, state
+        return batch_forward_info, pred_chain, label_chain, state, batch_train_info
 
 
     def get_reward(self, pred_chain, label_chain):
