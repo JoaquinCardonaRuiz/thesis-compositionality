@@ -21,8 +21,10 @@ train_path = os.environ.get("TRAIN_TSV", "data/train.tsv")
 valid_path = os.environ.get("VALID_TSV", "data/valid.tsv")  # optional; if missing we split train
 output_dir = os.environ.get("OUT_DIR", f"outputs/{model_id.split('/')[-1]}-qlora-tsv")
 
+os.makedirs(output_dir, exist_ok=True)
+
 # Max sequence length for packing/truncation
-max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "1024"))
+max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "512"))
 
 # ========= PROMPT & MASKING =========
 # We’ll train only on the "### Output:" part using response_template masking
@@ -36,10 +38,6 @@ INPUT: {inp}
 """
 
 RESPONSE_PREFIX = "### Output"
-
-def format_example(example: Dict[str, str]) -> str:
-    inp, out, cat = example["input"], example["output"], example["category"]
-    return PROMPT_TEMPLATE.format(category=cat, inp=inp) + out
 
 # ========= LOAD DATA =========
 def load_tsv(train_path: str, valid_path: Optional[str]) -> DatasetDict:
@@ -67,26 +65,42 @@ def load_tsv(train_path: str, valid_path: Optional[str]) -> DatasetDict:
 
 # ========= MODEL / TOKENIZER =========
 def get_model_tokenizer(model_id: str):
+    # select compute dtype sensibly
+    if torch.cuda.is_available():
+        # prefer bfloat16 on GPUs that support it (A100/H100)
+        compute_dtype = torch.bfloat16 if getattr(torch.cuda, "is_bf16_supported", lambda : False)() else torch.float16
+        model_dtype = torch.bfloat16 if compute_dtype is torch.bfloat16 else torch.float16
+    else:
+        compute_dtype = torch.float16
+        model_dtype = torch.float32  # CPU -> keep full precision (will not use bnb 4-bit anyway)
+
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=compute_dtype,
     )
 
     tok = AutoTokenizer.from_pretrained(model_id, use_fast=True)
-    # Handle missing pad token safely for causal LMs
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        quantization_config=bnb_config,
-        device_map="auto",
-        torch_dtype=torch.float16
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            quantization_config=bnb_config,
+            device_map="auto",
+            torch_dtype=model_dtype
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"Error loading model '{model_id}': {e}\n"
+            "If this is a gated HF model (e.g. Meta LLaMA family), run `huggingface-cli login` "
+            "and ensure your account has access to the model weights."
+        )
 
     return model, tok
+
 
 # ========= LoRA =========
 def get_lora_cfg(model_id: str) -> LoraConfig:
@@ -108,20 +122,16 @@ def main():
 
     # Map rows → single training strings
     def formatting_func(examples):
-        # batched dict of lists
-        if isinstance(examples["input"], list):
-            out = []
-            for i in range(len(examples["input"])):
-                ex = {
-                    "input": examples["input"][i],
-                    "output": examples["output"][i],
-                    "category": examples["category"][i],
-                }
-                out.append(format_example(ex))
-            return out
-        # single example dict
-        return format_example(examples)
+        # examples is a dict whose values are lists (for batched) OR strings (for map with batched=False)
+        # we normalize to lists
+        inputs = examples["input"] if isinstance(examples["input"], list) else [examples["input"]]
+        outputs = examples["output"] if isinstance(examples["output"], list) else [examples["output"]]
+        categories = examples["category"] if isinstance(examples["category"], list) else [examples["category"]]
 
+        formatted = []
+        for inp, out, cat in zip(inputs, outputs, categories):
+            formatted.append(PROMPT_TEMPLATE.format(category=cat, inp=inp) + out)
+        return formatted
 
     # Trainer config
     training_cfg = SFTConfig(
@@ -159,6 +169,10 @@ def main():
         args=training_cfg,
     )
 
+    print("Model dtype:", next(model.parameters()).dtype)
+    print("Device map:", model.hf_device_map if hasattr(model, "hf_device_map") else "none")
+    print("Tokenizer pad token id:", tok.pad_token_id)
+    
     trainer.train()
     trainer.save_model()  # saves LoRA adapter
     tok.save_pretrained(output_dir)

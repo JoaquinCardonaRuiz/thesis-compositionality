@@ -271,7 +271,7 @@ def test(test_data, model, example2type, device, log_file=None):
             if USE_CUDA:
                 tokens = tokens.cuda()
             # pdb.set_trace()
-            batch_forward_info, pred_chain, label_chain, state = model(test_data_example, tokens, 1, is_test=True)
+            batch_forward_info, pred_chain, label_chain, state, _ = model(test_data_example, tokens, 1, is_test=True)
 
             # pdb.set_trace()
             normalized_entropy, log_prob, reward = batch_forward_info[0]
@@ -347,7 +347,7 @@ def validate(valid_data, model, epoch, device, logger):
 
             # print('--' * 20)
             # print(valid_data_example[0])
-            batch_forward_info, pred_chain, label_chain, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
+            batch_forward_info, pred_chain, label_chain, _, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
             normalized_entropy, log_prob, reward = batch_forward_info[0]
 
             """
