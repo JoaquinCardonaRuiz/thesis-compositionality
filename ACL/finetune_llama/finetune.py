@@ -114,11 +114,12 @@ def main(args):
 
     # Map rows → single training strings
     def formatting_func(example):
-        # 'example' is a batch because TRL uses batched=True
-        return [
-            PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
-            for inp, out, cat in zip(example["input"], example["output"], example["category"])
-        ]
+        return {
+            "text": [
+                PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
+                for inp, out, cat in zip(example["input"], example["output"], example["category"])
+            ]
+        }
 
     # Trainer config
     training_cfg = SFTConfig(
@@ -141,7 +142,7 @@ def main(args):
         dataset_num_proc=4,
         optim="paged_adamw_8bit",
         report_to="none",
-        dataset_text_field=None
+        dataset_text_field="text"
     )
 
     trainer = SFTTrainer(
