@@ -127,7 +127,7 @@ def main(args):
 
     # Trainer config
     training_cfg = SFTConfig(
-        output_dir=output_dir,
+        output_dir=args.OUT_DIR,
         num_train_epochs=3,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=2,
@@ -141,7 +141,7 @@ def main(args):
         warmup_ratio=0.03,
         bf16=False,
         fp16=True,
-        max_seq_length=max_seq_len,
+        max_seq_length=args.MAX_SEQ_LEN,
         packing=False,             # set True if you want packing for speed on long corpora
         gradient_checkpointing=True,
         dataset_num_proc=4,
@@ -167,9 +167,9 @@ def main(args):
     
     trainer.train()
     trainer.save_model()  # saves LoRA adapter
-    tok.save_pretrained(output_dir)
+    tok.save_pretrained(args.OUT_DIR)
 
-    print("\nTraining complete. Adapter saved to:", output_dir)
+    print("\nTraining complete. Adapter saved to:", args.OUT_DIR)
     print("To run inference with the adapter, see the snippet below.")
 
 def parse_args():
@@ -185,6 +185,6 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.OUT_DIR, exist_ok=True)
     main(args)
     
