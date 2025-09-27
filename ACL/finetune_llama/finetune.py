@@ -113,16 +113,12 @@ def main(args):
     lora_cfg = get_lora_cfg(args.MODEL_ID)
 
     # Map rows → single training strings
-    def formatting_func(examples):
-        inputs = examples["input"]
-        outputs = examples["output"]
-        categories = examples["category"]
-
-        formatted = []
-        for inp, out, cat in zip(inputs, outputs, categories):
-            full = PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
-            formatted.append(full)
-        return {"text": formatted}
+    def formatting_func(example):
+        # 'example' is a batch because TRL uses batched=True
+        return [
+            PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
+            for inp, out, cat in zip(example["input"], example["output"], example["category"])
+        ]
 
     # Trainer config
     training_cfg = SFTConfig(
@@ -145,7 +141,7 @@ def main(args):
         dataset_num_proc=4,
         optim="paged_adamw_8bit",
         report_to="none",
-        dataset_text_field="text"
+        dataset_text_field=None
     )
 
     trainer = SFTTrainer(
