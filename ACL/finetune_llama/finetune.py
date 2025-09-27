@@ -123,9 +123,9 @@ def main(args):
             full = PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
             toks = tok(full, truncation=True, max_length=args.MAX_SEQ_LEN)
             truncated = tok.decode(toks["input_ids"], skip_special_tokens=True)
-            formatted.append({"text": truncated})  # Return a list of dictionaries with a "text" key
+            formatted.append(truncated)
 
-        return formatted
+        return {"text": formatted}
 
     # Trainer config
     training_cfg = SFTConfig(
