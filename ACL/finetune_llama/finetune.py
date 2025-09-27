@@ -114,17 +114,14 @@ def main(args):
 
     # Map rows → single training strings
     def formatting_func(examples):
-        inputs = examples["input"] if isinstance(examples["input"], list) else [examples["input"]]
-        outputs = examples["output"] if isinstance(examples["output"], list) else [examples["output"]]
-        categories = examples["category"] if isinstance(examples["category"], list) else [examples["category"]]
+        inputs = examples["input"]
+        outputs = examples["output"]
+        categories = examples["category"]
 
         formatted = []
         for inp, out, cat in zip(inputs, outputs, categories):
             full = PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
-            toks = tok(full, truncation=True, max_length=args.MAX_SEQ_LEN)
-            truncated = tok.decode(toks["input_ids"], skip_special_tokens=True)
-            formatted.append(truncated)
-
+            formatted.append(full)
         return {"text": formatted}
 
     # Trainer config
