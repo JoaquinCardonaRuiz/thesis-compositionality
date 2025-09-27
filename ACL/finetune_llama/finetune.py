@@ -114,12 +114,10 @@ def main(args):
 
     # Map rows → single training strings
     def formatting_func(example):
-        return {
-            "text": [
-                PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
-                for inp, out, cat in zip(example["input"], example["output"], example["category"])
-            ]
-        }
+        return [
+            PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
+            for inp, out, cat in zip(example["input"], example["output"], example["category"])
+        ]
 
     # Trainer config
     training_cfg = SFTConfig(
