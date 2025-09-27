@@ -114,15 +114,18 @@ def main(args):
 
     # Map rows → single training strings
     def formatting_func(examples):
-        # examples is a dict whose values are lists (for batched) OR strings (for map with batched=False)
-        # we normalize to lists
+        # ensure lists
         inputs = examples["input"] if isinstance(examples["input"], list) else [examples["input"]]
         outputs = examples["output"] if isinstance(examples["output"], list) else [examples["output"]]
         categories = examples["category"] if isinstance(examples["category"], list) else [examples["category"]]
 
         formatted = []
         for inp, out, cat in zip(inputs, outputs, categories):
-            formatted.append(PROMPT_TEMPLATE.format(category=cat, inp=inp) + out)
+            full = PROMPT_TEMPLATE.format(category=cat, inp=inp) + out
+            # Tokenize & truncate to MAX_SEQ_LEN tokens, then decode back to string
+            toks = tok(full, truncation=True, max_length=args.MAX_SEQ_LEN)
+            truncated = tok.decode(toks["input_ids"], skip_special_tokens=True)
+            formatted.append(truncated)
         return formatted
 
     # Trainer config
@@ -141,7 +144,6 @@ def main(args):
         warmup_ratio=0.03,
         bf16=False,
         fp16=True,
-        max_seq_length=args.MAX_SEQ_LEN,
         packing=False,             # set True if you want packing for speed on long corpora
         gradient_checkpointing=True,
         dataset_num_proc=4,
