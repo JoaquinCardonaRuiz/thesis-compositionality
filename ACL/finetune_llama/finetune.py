@@ -125,7 +125,7 @@ def main(args):
             truncated = tok.decode(toks["input_ids"], skip_special_tokens=True)
             formatted.append(truncated)
 
-        return {"text": formatted}
+        return formatted  # Return a list of strings, not a dictionary
 
     # Trainer config
     training_cfg = SFTConfig(
