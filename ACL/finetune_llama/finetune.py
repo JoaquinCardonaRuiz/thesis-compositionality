@@ -153,7 +153,6 @@ def main(args):
 
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tok,
         peft_config=lora_cfg,
         train_dataset=data["train"],
         eval_dataset=data["validation"],
