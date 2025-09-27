@@ -7,6 +7,8 @@ from datasets import load_dataset, DatasetDict
 from transformers import (AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig)
 from trl import SFTTrainer, SFTConfig
 from peft import LoraConfig
+import argparse
+
 
 # ========= USER CONFIG =========
 # Choose ONE model id (examples):
@@ -15,16 +17,6 @@ from peft import LoraConfig
 # - Llama 2 (requires HF auth): "meta-llama/Llama-2-7b-hf"
 # - Llama 3 (requires HF auth): "meta-llama/Meta-Llama-3-8B-Instruct"
 # - Mistral 7B: "mistralai/Mistral-7B-Instruct-v0.3"
-model_id = os.environ.get("MODEL_ID", "meta-llama/Meta-Llama-3-8B-Instruct")
-
-train_path = os.environ.get("TRAIN_TSV", "data/train.tsv")
-valid_path = os.environ.get("VALID_TSV", "data/valid.tsv")  # optional; if missing we split train
-output_dir = os.environ.get("OUT_DIR", f"outputs/{model_id.split('/')[-1]}-qlora-tsv")
-
-os.makedirs(output_dir, exist_ok=True)
-
-# Max sequence length for packing/truncation
-max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "512"))
 
 # ========= PROMPT & MASKING =========
 # We’ll train only on the "### Output:" part using response_template masking
@@ -115,10 +107,10 @@ def get_lora_cfg(model_id: str) -> LoraConfig:
         target_modules=target_modules
     )
 
-def main():
-    data = load_tsv(train_path, valid_path if os.path.exists(valid_path) else None)
-    model, tok = get_model_tokenizer(model_id)
-    lora_cfg = get_lora_cfg(model_id)
+def main(args):
+    data = load_tsv(args.TRAIN_TSV, args.VALID_TSV if os.path.exists(args.VALID_TSV) else None)
+    model, tok = get_model_tokenizer(args.MODEL_ID)
+    lora_cfg = get_lora_cfg(args.MODEL_ID)
 
     # Map rows → single training strings
     def formatting_func(examples):
@@ -180,5 +172,19 @@ def main():
     print("\nTraining complete. Adapter saved to:", output_dir)
     print("To run inference with the adapter, see the snippet below.")
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--MODEL_ID", type=str, default=os.environ.get("MODEL_ID", "meta-llama/Meta-Llama-3-8B-Instruct"))
+    parser.add_argument("--TRAIN_TSV", type=str, default=os.environ.get("TRAIN_TSV", "data/train.tsv"))
+    parser.add_argument("--VALID_TSV", type=str, default=os.environ.get("VALID_TSV", "data/valid.tsv"))
+    parser.add_argument("--OUT_DIR", type=str, default=os.environ.get("OUT_DIR", "outputs/default-qlora"))
+    parser.add_argument("--MAX_SEQ_LEN", type=int, default=int(os.environ.get("MAX_SEQ_LEN", "512")))
+    return parser.parse_args()
+
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+    main(args)
+    
