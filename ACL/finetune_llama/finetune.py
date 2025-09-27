@@ -114,19 +114,18 @@ def main(args):
 
     # Map rows → single training strings
     def formatting_func(examples):
-        # ensure lists
         inputs = examples["input"] if isinstance(examples["input"], list) else [examples["input"]]
         outputs = examples["output"] if isinstance(examples["output"], list) else [examples["output"]]
         categories = examples["category"] if isinstance(examples["category"], list) else [examples["category"]]
 
         formatted = []
         for inp, out, cat in zip(inputs, outputs, categories):
-            full = PROMPT_TEMPLATE.format(category=cat, inp=inp) + out
-            # Tokenize & truncate to MAX_SEQ_LEN tokens, then decode back to string
+            full = PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
             toks = tok(full, truncation=True, max_length=args.MAX_SEQ_LEN)
             truncated = tok.decode(toks["input_ids"], skip_special_tokens=True)
             formatted.append(truncated)
-        return formatted
+
+        return {"text": formatted}
 
     # Trainer config
     training_cfg = SFTConfig(
@@ -139,18 +138,17 @@ def main(args):
         save_steps=500,
         eval_strategy="steps",
         eval_steps=500,
-        learning_rate=2e-4,        # a good QLoRA starting LR
+        learning_rate=2e-4,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         bf16=False,
         fp16=True,
-        packing=False,             # set True if you want packing for speed on long corpora
+        packing=False,
         gradient_checkpointing=True,
         dataset_num_proc=4,
         optim="paged_adamw_8bit",
         report_to="none",
-        dataset_text_field=None,   # we'll use formatting_func instead
-        response_template=RESPONSE_PREFIX,  # masks loss before this tag
+        dataset_text_field=None,  # we'll use formatting_func instead
     )
 
     trainer = SFTTrainer(
