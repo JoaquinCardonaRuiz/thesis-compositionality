@@ -112,14 +112,10 @@ def main(args):
     model, tok = get_model_tokenizer(args.MODEL_ID)
     lora_cfg = get_lora_cfg(args.MODEL_ID)
 
-    # Map rows → single training strings
+    # Now formatting_func works per-example, not per-batch
     def formatting_func(example):
-        return [
-            PROMPT_TEMPLATE.format(category=cat, inp=inp) + RESPONSE_PREFIX + "\n" + out
-            for inp, out, cat in zip(example["input"], example["output"], example["category"])
-        ]
+        return PROMPT_TEMPLATE.format(category=example["category"], inp=example["input"]) + RESPONSE_PREFIX + "\n" + example["output"]
 
-    # Trainer config
     training_cfg = SFTConfig(
         output_dir=args.OUT_DIR,
         num_train_epochs=3,
@@ -140,7 +136,7 @@ def main(args):
         dataset_num_proc=4,
         optim="paged_adamw_8bit",
         report_to="none",
-        dataset_text_field="text"
+        # ⛔ remove dataset_text_field to let TRL handle it
     )
 
     trainer = SFTTrainer(
@@ -155,9 +151,9 @@ def main(args):
     print("Model dtype:", next(model.parameters()).dtype)
     print("Device map:", model.hf_device_map if hasattr(model, "hf_device_map") else "none")
     print("Tokenizer pad token id:", tok.pad_token_id)
-    
+
     trainer.train()
-    trainer.save_model()  # saves LoRA adapter
+    trainer.save_model()
     tok.save_pretrained(args.OUT_DIR)
 
     print("\nTraining complete. Adapter saved to:", args.OUT_DIR)
