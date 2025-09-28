@@ -118,15 +118,15 @@ def main(args):
 
     training_cfg = SFTConfig(
         output_dir=args.OUT_DIR,
-        num_train_epochs=3,
+        num_train_epochs=1,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=2,
         gradient_accumulation_steps=16,
         logging_steps=10,
-        save_steps=500,
+        save_steps=300,
         eval_strategy="steps",
-        eval_steps=500,
-        learning_rate=2e-4,
+        eval_steps=50,
+        learning_rate=5e-5,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         bf16=False,
@@ -136,7 +136,6 @@ def main(args):
         dataset_num_proc=4,
         optim="paged_adamw_8bit",
         report_to="none",
-        # ⛔ remove dataset_text_field to let TRL handle it
     )
 
     trainer = SFTTrainer(
