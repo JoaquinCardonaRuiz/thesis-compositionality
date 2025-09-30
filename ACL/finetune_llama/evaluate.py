@@ -139,15 +139,31 @@ def main():
             raise RuntimeError("peft is not installed but adapter_dir was provided.")
         model = PeftModel.from_pretrained(model, args.adapter_dir)
     model = torch.compile(model)
-    model.eval()
+    # Move model to GPU first
+    model = model.to("cuda")
+    model.eval()  # No torch.compile for evaluation
 
-    # Test prints
-    print(f"Model: {args.model_id} {'with adapter ' + args.adapter_dir if args.adapter_dir else '(base model)'}")
-    lora_params = [n for n, p in model.named_parameters() if "lora" in n]
-    print("LoRA parameters found:", len(lora_params))
-    print("Example output: ")
-    prompt = "Avery froze a girl on a bed beside a table in the room."
-    output = tok.decode(model.generate(tok(prompt, return_tensors="pt").input_ids.cuda(), max_new_tokens=64)[0])
+    # Tokenize with attention mask
+    prompt =  """### Instruction
+                You are given an INPUT sentence and its CATEGORY. Produce the correct OUTPUT.
+
+                CATEGORY: "in_distribution"
+                INPUT: Avery froze a girl on a bed beside a table in the room.
+
+                ### Output
+                """
+
+    inputs = tok(prompt, return_tensors="pt").to("cuda")
+
+    # Generation with low temperature to make it deterministic
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=64,
+        temperature=0.0,  # deterministic
+        do_sample=False,  # greedy decoding
+        pad_token_id=tok.eos_token_id
+    )
+    output = tok.decode(output_ids[0], skip_special_tokens=True)
     print("Prediction:", output)
 
     print("")

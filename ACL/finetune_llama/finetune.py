@@ -21,9 +21,8 @@ import argparse
 # ========= PROMPT & MASKING =========
 # We’ll train only on the "### Output:" part using response_template masking
 PROMPT_TEMPLATE = """### Instruction
-You are given an INPUT sentence and its CATEGORY. Produce the correct OUTPUT.
+You are given an INPUT sentence. Produce the correct OUTPUT.
 
-CATEGORY: {category}
 INPUT: {inp}
 
 ### Output
@@ -114,7 +113,7 @@ def main(args):
 
     # Now formatting_func works per-example, not per-batch
     def formatting_func(example):
-        return PROMPT_TEMPLATE.format(category=example["category"], inp=example["input"]) + RESPONSE_PREFIX + "\n" + example["output"]
+        return PROMPT_TEMPLATE.format(inp=example["input"]) + RESPONSE_PREFIX + "\n" + example["output"]
 
     training_cfg = SFTConfig(
         output_dir=args.OUT_DIR,
