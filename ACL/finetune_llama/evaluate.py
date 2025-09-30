@@ -138,7 +138,7 @@ def main():
         if not PEFT_AVAILABLE:
             raise RuntimeError("peft is not installed but adapter_dir was provided.")
         model = PeftModel.from_pretrained(model, args.adapter_dir)
-    model = torch.compile(model)
+
     # Move model to GPU first
     model = model.to("cuda")
     model.eval()  # No torch.compile for evaluation
@@ -150,7 +150,6 @@ def main():
                 CATEGORY: "in_distribution"
                 INPUT: Avery froze a girl on a bed beside a table in the room.
 
-                ### Output
                 """
 
     inputs = tok(prompt, return_tensors="pt").to("cuda")
@@ -158,7 +157,7 @@ def main():
     # Generation with low temperature to make it deterministic
     output_ids = model.generate(
         **inputs,
-        max_new_tokens=64,
+        max_new_tokens=128,
         temperature=0.0,  # deterministic
         do_sample=False,  # greedy decoding
         pad_token_id=tok.eos_token_id
