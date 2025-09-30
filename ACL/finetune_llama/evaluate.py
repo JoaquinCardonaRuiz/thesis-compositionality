@@ -2,19 +2,17 @@ import argparse
 import json
 import os
 import re
-from collections import defaultdict, Counter
-from transformers import BitsAndBytesConfig
+from collections import Counter
 
 import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
 try:
     from peft import PeftModel
     PEFT_AVAILABLE = True
-except Exception:
+except ImportError:
     PEFT_AVAILABLE = False
-
 
 # ---------- Prompt (must match training) ----------
 PROMPT_TEMPLATE = """### Instruction
@@ -28,21 +26,17 @@ INPUT: {inp}
 
 RESPONSE_PREFIX = "### Output"
 
-
 def build_prompt(inp: str, cat: str) -> str:
     return PROMPT_TEMPLATE.format(category=cat, inp=inp)
 
-
-# ---------- Normalization for exact match ----------
+# ---------- Normalization ----------
 SPACE_RE = re.compile(r"\s+")
-
 def normalize(s: str, lowercase: bool = False) -> str:
     s = s.strip()
     s = SPACE_RE.sub(" ", s)
     if lowercase:
         s = s.lower()
     return s
-
 
 # ---------- Data loader ----------
 def load_tsv(path: str):
@@ -51,21 +45,14 @@ def load_tsv(path: str):
         data_files={"test": path},
         delimiter="\t",
         column_names=["input", "output", "category"],
-        quoting=3  # csv.QUOTE_NONE
+        quoting=3
     )["test"]
     return ds
 
-
-# ---------- Inference ----------
+# ---------- Batched generation ----------
 @torch.inference_mode()
 def generate_batch(model, tok, prompts, max_new_tokens=128):
-    enc = tok(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=2048,  # safeguard; does not affect new tokens
-    )
+    enc = tok(prompts, return_tensors="pt", padding=True, truncation=True, max_length=2048)
     enc = {k: v.to(model.device) for k, v in enc.items()}
 
     input_lens = enc["input_ids"].ne(tok.pad_token_id).sum(dim=1)
@@ -74,8 +61,7 @@ def generate_batch(model, tok, prompts, max_new_tokens=128):
         **enc,
         max_new_tokens=max_new_tokens,
         do_sample=False,
-        temperature=None,
-        top_p=None,
+        temperature=0.0,
         eos_token_id=tok.eos_token_id,
         pad_token_id=tok.pad_token_id,
     )
@@ -84,38 +70,35 @@ def generate_batch(model, tok, prompts, max_new_tokens=128):
     for i in range(out.size(0)):
         gen_tokens = out[i, input_lens[i]:]
         text = tok.decode(gen_tokens, skip_special_tokens=True)
-        # Stop at a safety cutoff if the model keeps talking after the answer
-        cutoff = text.split("\n###", 1)[0]
-        preds.append(cutoff.strip())
+        # Extract text after "### Output" if present
+        if RESPONSE_PREFIX in text:
+            text = text.split(RESPONSE_PREFIX, 1)[-1].strip()
+        preds.append(text.strip())
     return preds
 
-
+# ---------- Main evaluation ----------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model_id", required=True,
-                    help="HF model id (e.g. meta-llama/Meta-Llama-3-8B-Instruct)")
-    ap.add_argument("--adapter_dir", default=None,
-                    help="Optional LoRA adapter directory (from training). If omitted, evaluates the base model.")
-    ap.add_argument("--test_tsv", required=True, help="Path to TSV with 3 columns: input, output, category")
+    ap.add_argument("--model_id", required=True)
+    ap.add_argument("--adapter_dir", default=None)
+    ap.add_argument("--test_tsv", required=True)
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--max_new_tokens", type=int, default=128)
-    ap.add_argument("--lowercase_norm", action="store_true",
-                    help="If set, compare predictions and gold in lowercase.")
-    ap.add_argument("--metrics_out", default=None, help="Optional JSON path to save metrics.")
-    ap.add_argument("--preds_out", default=None,
-                    help="Optional TSV path to save (input, gold, pred, category).")
+    ap.add_argument("--lowercase_norm", action="store_true")
+    ap.add_argument("--metrics_out", default=None)
+    ap.add_argument("--preds_out", default=None)
     args = ap.parse_args()
 
-    # Load data
+    # Load dataset
     ds = load_tsv(args.test_tsv)
 
-    # Model + tokenizer
+    # Tokenizer
     tok = AutoTokenizer.from_pretrained(args.model_id, use_fast=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
 
-    # Use bfloat16 on GPU if available; CPU falls back to float32
+    # Model
     torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     bnb = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -128,47 +111,27 @@ def main():
         args.model_id,
         torch_dtype=torch_dtype,
         quantization_config=bnb,
-        device_map={"": 0},   # force everything onto GPU:0
-        load_in_8bit = False
+        device_map={"": 0},
+        load_in_8bit=False
     )
     model.gradient_checkpointing_disable()
     model.config.use_cache = True
 
     if args.adapter_dir:
         if not PEFT_AVAILABLE:
-            raise RuntimeError("peft is not installed but adapter_dir was provided.")
+            raise RuntimeError("PEFT not installed but adapter_dir provided")
         model = PeftModel.from_pretrained(model, args.adapter_dir)
 
-    # Move model to GPU first
     model = model.to("cuda")
-    model.eval()  # No torch.compile for evaluation
+    model.eval()
 
-    # Tokenize with attention mask
-    prompt =  """### Instruction
-                You are given an INPUT sentence and its CATEGORY. Produce the correct OUTPUT.
+    # Quick test prediction
+    test_prompt = build_prompt("Avery froze a girl on a bed beside a table in the room.", "in_distribution")
+    print("Example generation:")
+    print(generate_batch(model, tok, [test_prompt], max_new_tokens=64)[0])
+    print("\nBegin evaluation...\n")
 
-                CATEGORY: "in_distribution"
-                INPUT: Avery froze a girl on a bed beside a table in the room.
-
-                """
-
-    inputs = tok(prompt, return_tensors="pt").to("cuda")
-
-    # Generation with low temperature to make it deterministic
-    output_ids = model.generate(
-        **inputs,
-        max_new_tokens=128,
-        temperature=0.0,  # deterministic
-        do_sample=False,  # greedy decoding
-        pad_token_id=tok.eos_token_id
-    )
-    output = tok.decode(output_ids[0], skip_special_tokens=True)
-    print("Prediction:", output)
-
-    print("")
-    print("Begin evaluation...")
-
-    # Iterate in batches
+    # Metrics tracking
     n = len(ds)
     bs = max(1, args.batch_size)
     correct = 0
@@ -179,31 +142,28 @@ def main():
     for start in range(0, n, bs):
         end = min(start + bs, n)
         batch = ds.select(range(start, end))
-
         if (start // bs) % 5 == 0:
             print(f"Processed {start}/{n} examples")
-
 
         prompts = [build_prompt(inp, cat) for inp, cat in zip(batch["input"], batch["category"])]
         batch_preds = generate_batch(model, tok, prompts, max_new_tokens=args.max_new_tokens)
 
-        # Evaluate this batch
         for inp, gold, cat, pred in zip(batch["input"], batch["output"], batch["category"], batch_preds):
             gold_n = normalize(gold, args.lowercase_norm)
             pred_n = normalize(pred, args.lowercase_norm)
-            is_correct = (gold_n == pred_n)
-            correct += int(is_correct)
+            is_correct = int(gold_n == pred_n)
+            correct += is_correct
             by_cat_total[cat] += 1
-            by_cat_correct[cat] += int(is_correct)
+            by_cat_correct[cat] += is_correct
             if args.preds_out:
-                preds_records.append((inp, gold, pred, cat, int(is_correct)))
+                preds_records.append((inp, gold, pred, cat, is_correct))
 
     # Metrics
     overall_acc = correct / n if n else 0.0
     per_cat = {cat: (by_cat_correct[cat] / by_cat_total[cat]) for cat in by_cat_total}
     macro_acc = sum(per_cat.values()) / len(per_cat) if per_cat else 0.0
 
-    # Print summary (no per-example outputs)
+    # Print summary
     print(f"Examples: {n}")
     print(f"Overall accuracy (micro): {overall_acc*100:.2f}% ({correct}/{n})")
     print(f"Macro accuracy (mean over categories): {macro_acc*100:.2f}%")
@@ -213,7 +173,7 @@ def main():
         t = by_cat_total[cat]
         print(f"  {cat}: {100*c/t:.2f}% ({c}/{t})")
 
-    # Optional artifacts
+    # Save metrics
     if args.metrics_out:
         metrics = {
             "num_examples": n,
@@ -221,20 +181,20 @@ def main():
             "macro_accuracy": macro_acc,
             "per_category": {k: float(v) for k, v in per_cat.items()},
         }
+        os.makedirs(os.path.dirname(args.metrics_out) or ".", exist_ok=True)
         with open(args.metrics_out, "w") as f:
             json.dump(metrics, f, indent=2)
         print(f"Saved metrics to: {args.metrics_out}")
 
+    # Save predictions
     if args.preds_out and preds_records:
         os.makedirs(os.path.dirname(args.preds_out) or ".", exist_ok=True)
         with open(args.preds_out, "w", encoding="utf-8") as f:
             f.write("input\tgold\tpred\tcategory\tcorrect\n")
             for rec in preds_records:
-                # Escape internal tabs/newlines just in case
                 safe = [str(x).replace("\t", " ").replace("\n", " ") for x in rec]
                 f.write("\t".join(safe) + "\n")
         print(f"Saved predictions to: {args.preds_out}")
-
 
 if __name__ == "__main__":
     main()
