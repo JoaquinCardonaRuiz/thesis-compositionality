@@ -128,7 +128,7 @@ def main():
         args.model_id,
         torch_dtype=torch_dtype,
         quantization_config=bnb,
-        device_map="auto",
+        device_map={"": 0},   # force everything onto GPU:0
     )
     model.gradient_checkpointing_disable()
     model.config.use_cache = True
@@ -136,7 +136,8 @@ def main():
     if args.adapter_dir:
         if not PEFT_AVAILABLE:
             raise RuntimeError("peft is not installed but adapter_dir was provided.")
-        model = PeftModel.from_pretrained(model, args.adapter_dir)
+        model = PeftModel.from_pretrained(model, args.adapter_dir, device_map={"": 0})
+    model = torch.compile(model)
     model.eval()
 
     # Iterate in batches
