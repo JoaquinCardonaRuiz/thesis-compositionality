@@ -16,9 +16,8 @@ except ImportError:
 
 # ---------- Prompt (must match training) ----------
 PROMPT_TEMPLATE = """### Instruction
-You are given an INPUT sentence and its CATEGORY. Produce the correct OUTPUT.
+You are given an INPUT sentence. Produce the correct OUTPUT.
 
-CATEGORY: {category}
 INPUT: {inp}
 
 ### Output
@@ -26,8 +25,8 @@ INPUT: {inp}
 
 RESPONSE_PREFIX = "### Output"
 
-def build_prompt(inp: str, cat: str) -> str:
-    return PROMPT_TEMPLATE.format(category=cat, inp=inp)
+def build_prompt(inp: str) -> str:
+    return PROMPT_TEMPLATE.format(inp=inp)
 
 # ---------- Normalization ----------
 SPACE_RE = re.compile(r"\s+")
@@ -126,7 +125,7 @@ def main():
     model.eval()
 
     # Quick test prediction
-    test_prompt = build_prompt("Avery froze a girl on a bed beside a table in the room.", "in_distribution")
+    test_prompt = build_prompt("Avery froze a girl on a bed beside a table in the room.")
     print("Example generation:")
     print(generate_batch(model, tok, [test_prompt], max_new_tokens=64)[0])
     print("\nBegin evaluation...\n")
@@ -145,7 +144,7 @@ def main():
         if (start // bs) % 5 == 0:
             print(f"Processed {start}/{n} examples")
 
-        prompts = [build_prompt(inp, cat) for inp, cat in zip(batch["input"], batch["category"])]
+        prompts = [build_prompt(inp) for inp in batch["input"]]
         batch_preds = generate_batch(model, tok, prompts, max_new_tokens=args.max_new_tokens)
 
         for inp, gold, cat, pred in zip(batch["input"], batch["output"], batch["category"], batch_preds):
