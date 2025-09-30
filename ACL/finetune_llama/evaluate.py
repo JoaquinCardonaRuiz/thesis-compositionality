@@ -74,7 +74,7 @@ def generate_batch(model, tok, prompts, max_new_tokens=128):
         **enc,
         max_new_tokens=max_new_tokens,
         do_sample=False,
-        temperature=0.0,
+        num_beams=1,            # set >1 if you want beam search, e.g. 3 or 5
         eos_token_id=tok.eos_token_id,
         pad_token_id=tok.pad_token_id,
     )
@@ -112,6 +112,7 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model_id, use_fast=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+    tok.padding_side = "left"
 
     # Use bfloat16 on GPU if available; CPU falls back to float32
     torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
@@ -145,6 +146,10 @@ def main():
     for start in range(0, n, bs):
         end = min(start + bs, n)
         batch = ds.select(range(start, end))
+
+        if (start // bs) % 10 == 0:
+            print(f"Processed {start}/{n} examples")
+
 
         prompts = [build_prompt(inp, cat) for inp, cat in zip(batch["input"], batch["category"])]
         batch_preds = generate_batch(model, tok, prompts, max_new_tokens=args.max_new_tokens)
