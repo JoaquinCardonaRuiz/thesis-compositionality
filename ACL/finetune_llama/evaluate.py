@@ -74,7 +74,8 @@ def generate_batch(model, tok, prompts, max_new_tokens=128):
         **enc,
         max_new_tokens=max_new_tokens,
         do_sample=False,
-        num_beams=1,            # set >1 if you want beam search, e.g. 3 or 5
+        temperature=None,
+        top_p=None,
         eos_token_id=tok.eos_token_id,
         pad_token_id=tok.pad_token_id,
     )
@@ -129,6 +130,9 @@ def main():
         quantization_config=bnb,
         device_map="auto",
     )
+    model.gradient_checkpointing_disable()
+    model.config.use_cache = True
+
     if args.adapter_dir:
         if not PEFT_AVAILABLE:
             raise RuntimeError("peft is not installed but adapter_dir was provided.")
