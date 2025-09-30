@@ -129,6 +129,7 @@ def main():
         torch_dtype=torch_dtype,
         quantization_config=bnb,
         device_map={"": 0},   # force everything onto GPU:0
+        load_in_8bit = False
     )
     model.gradient_checkpointing_disable()
     model.config.use_cache = True
@@ -136,9 +137,21 @@ def main():
     if args.adapter_dir:
         if not PEFT_AVAILABLE:
             raise RuntimeError("peft is not installed but adapter_dir was provided.")
-        model = PeftModel.from_pretrained(model, args.adapter_dir, device_map={"": 0})
+        model = PeftModel.from_pretrained(model, args.adapter_dir)
     model = torch.compile(model)
     model.eval()
+
+    # Test prints
+    print(f"Model: {args.model_id} {'with adapter ' + args.adapter_dir if args.adapter_dir else '(base model)'}")
+    lora_params = [n for n, p in model.named_parameters() if "lora" in n]
+    print("LoRA parameters found:", len(lora_params))
+    print("Example output: ")
+    prompt = "Avery froze a girl on a bed beside a table in the room."
+    output = tok.decode(model.generate(tok(prompt, return_tensors="pt").input_ids.cuda(), max_new_tokens=64)[0])
+    print("Prediction:", output)
+
+    print("")
+    print("Begin evaluation...")
 
     # Iterate in batches
     n = len(ds)
@@ -152,7 +165,7 @@ def main():
         end = min(start + bs, n)
         batch = ds.select(range(start, end))
 
-        if (start // bs) % 10 == 0:
+        if (start // bs) % 5 == 0:
             print(f"Processed {start}/{n} examples")
 
 
