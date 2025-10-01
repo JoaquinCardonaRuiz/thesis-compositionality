@@ -29,12 +29,11 @@ def build_prompt(inp: str) -> str:
     return PROMPT_TEMPLATE.format(inp=inp)
 
 # ---------- Normalization ----------
-SPACE_RE = re.compile(r"\s+")
-def normalize(s: str, lowercase: bool = False) -> str:
+def normalize(s: str) -> str:
     s = s.strip()
-    s = SPACE_RE.sub(" ", s)
-    if lowercase:
-        s = s.lower()
+    s = s.replace(' ','')
+    s = s.lower()
+    s = s.replace('###output','')
     return s
 
 # ---------- Data loader ----------
@@ -148,8 +147,8 @@ def main():
         batch_preds = generate_batch(model, tok, prompts, max_new_tokens=args.max_new_tokens)
 
         for inp, gold, cat, pred in zip(batch["input"], batch["output"], batch["category"], batch_preds):
-            gold_n = normalize(gold, args.lowercase_norm)
-            pred_n = normalize(pred, args.lowercase_norm)
+            gold_n = normalize(gold)
+            pred_n = normalize(pred)
             is_correct = int(gold_n == pred_n)
             correct += is_correct
             by_cat_total[cat] += 1
