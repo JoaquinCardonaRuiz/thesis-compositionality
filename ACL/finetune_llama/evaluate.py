@@ -33,7 +33,7 @@ def normalize(s: str) -> str:
     s = s.strip()
     s = s.replace(' ','')
     s = s.lower()
-    s = s.replace('###output','')
+    s = s.replace('### output','')
     return s
 
 # ---------- Data loader ----------
@@ -108,8 +108,9 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         torch_dtype=torch_dtype,
+        low_cpu_mem_usage=True,
         quantization_config=bnb,
-        device_map={"": 0},
+        device_map="auto",
         load_in_8bit=False
     )
     model.gradient_checkpointing_disable()
