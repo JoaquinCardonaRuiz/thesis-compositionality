@@ -469,6 +469,9 @@ def main(args):
                     "idx_to_tok": idx_to_tok,
                 }, args.checkpoint)
                 print(f"Saved best model to {args.checkpoint}")
+            
+            if best_test_acc == -1.0:
+                raise ValueError(f"Something went wrong, best_test_acc is still -1.0 after epoch {epoch}")
 
     # load best
     ckpt = torch.load(args.checkpoint, map_location=device)
