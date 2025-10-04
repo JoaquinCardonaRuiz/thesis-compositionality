@@ -448,26 +448,27 @@ def main(args):
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 
-    # training loop
-    best_test_acc = -1.0
-    for epoch in range(1, args.epochs + 1):
-        print(f"\nEpoch {epoch}/{args.epochs}")
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, pad_idx, device)
-        print(f"Train loss: {train_loss:.4f}")
+    if not args.eval_mode:
+        # training loop
+        best_test_acc = -1.0
+        for epoch in range(1, args.epochs + 1):
+            print(f"\nEpoch {epoch}/{args.epochs}")
+            train_loss = train_epoch(model, train_loader, optimizer, criterion, pad_idx, device)
+            print(f"Train loss: {train_loss:.4f}")
 
-        # quick evaluate on test set (exact match)
-        test_acc, _, _ = evaluate_exact_match(model, test_loader, tok_to_idx, idx_to_tok, pad_idx, device, max_len=args.max_len)
-        print(f"Test exact-match acc: {test_acc:.4f}")
+            # quick evaluate on test set (exact match)
+            test_acc, _, _ = evaluate_exact_match(model, test_loader, tok_to_idx, idx_to_tok, pad_idx, device, max_len=args.max_len)
+            print(f"Test exact-match acc: {test_acc:.4f}")
 
-        if test_acc > best_test_acc:
-            best_test_acc = test_acc
-            # save checkpoint
-            torch.save({
-                "model_state_dict": model.state_dict(),
-                "tok_to_idx": tok_to_idx,
-                "idx_to_tok": idx_to_tok,
-            }, args.checkpoint)
-            print(f"Saved best model to {args.checkpoint}")
+            if test_acc > best_test_acc:
+                best_test_acc = test_acc
+                # save checkpoint
+                torch.save({
+                    "model_state_dict": model.state_dict(),
+                    "tok_to_idx": tok_to_idx,
+                    "idx_to_tok": idx_to_tok,
+                }, args.checkpoint)
+                print(f"Saved best model to {args.checkpoint}")
 
     # load best
     ckpt = torch.load(args.checkpoint, map_location=device)
@@ -508,5 +509,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=DEFAULTS["seed"])
     parser.add_argument("--checkpoint", type=str, default="best_transformer.pt")
     parser.add_argument("--device", type=str, default=DEFAULTS["device"])
+    parser.add_argument("--eval_mode", action="store_true", help="if set, only run evaluation using --checkpoint")
     args = parser.parse_args()
     main(args)
