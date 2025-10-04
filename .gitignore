@@ -18,6 +18,8 @@ LEAR/CPU_DeAR/slog_data
 
 
 ACL/finetune_llama/data/*
+ACL/train_transformer/data/*
+ACL/finetune_llama/logs/*
 ACL/sparsity_test/*.tsv
 LEAR\Temp
 
