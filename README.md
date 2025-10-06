@@ -1,4 +1,4 @@
-# Master's Thesis - VU
+# Examining Algebraic Recombination for Compositional Generalisation
 
 This repository contains the codebase for the paper Examining Algebraic Recombination for Compositional Generalisation.
 
