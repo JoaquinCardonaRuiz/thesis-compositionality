@@ -23,3 +23,5 @@ To run the VizARD tool:
 cd pred_visualiser
 python pred_visualiser.py
 ```
+
+This repository includes code taken from https://github.com/thousfeet/LEAR
