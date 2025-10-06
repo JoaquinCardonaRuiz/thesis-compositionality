@@ -440,9 +440,18 @@ def main(args):
                             collate_fn=lambda b: collate_batch(b, pad_idx))
 
     # model
-    model = TransformerSeq2Seq(vocab_size=vocab_size, emb_size=args.emb_size, nhead=args.nhead,
-                               num_encoder_layers=args.num_encoder_layers, num_decoder_layers=args.num_decoder_layers,
-                               ffn_hidden=args.ffn_hidden, dropout=args.dropout, max_len=args.max_len, pad_idx=pad_idx)
+    if args.load_checkpoint:
+        print(f"Loading model from checkpoint {args.checkpoint} before training...")
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        model = TransformerSeq2Seq(vocab_size=vocab_size, emb_size=args.emb_size, nhead=args.nhead,
+                                   num_encoder_layers=args.num_encoder_layers, num_decoder_layers=args.num_decoder_layers,
+                                   ffn_hidden=args.ffn_hidden, dropout=args.dropout, max_len=args.max_len, pad_idx=pad_idx)
+        model.load_state_dict(ckpt["model_state_dict"])
+    
+    else:
+        model = TransformerSeq2Seq(vocab_size=vocab_size, emb_size=args.emb_size, nhead=args.nhead,
+                                   num_encoder_layers=args.num_encoder_layers, num_decoder_layers=args.num_decoder_layers,
+                                   ffn_hidden=args.ffn_hidden, dropout=args.dropout, max_len=args.max_len, pad_idx=pad_idx)
     model = model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -513,5 +522,6 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default="best_transformer.pt")
     parser.add_argument("--device", type=str, default=DEFAULTS["device"])
     parser.add_argument("--eval_mode", action="store_true", help="if set, only run evaluation using --checkpoint")
+    parser.add_argument("--load_checkpoint", action="store_true", help="if set, load model from --checkpoint before training")
     args = parser.parse_args()
     main(args)
