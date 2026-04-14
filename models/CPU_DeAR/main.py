@@ -1,3 +1,9 @@
+"""Training and evaluation entrypoint for the CPU_DeAR experiments.
+
+This module handles dataset preparation, optimizer setup, train/validation loops,
+and checkpoint-based testing.
+"""
+
 import argparse
 import os
 import random
@@ -8,25 +14,33 @@ from functools import partial
 import torch
 from torch import nn
 from torch.autograd import Variable
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from model import HRLModel, PAD_token, EOS_token
 from utils import AverageMeter
-from utils import get_logger
 from utils import Logger
 
 import re
 import json
-
-import pdb
 
 USE_CUDA = False
 global_step = 0
 
 
 class Lang:
+    """Vocabulary container used for source and target token indexing.
+
+    The object keeps bidirectional token/index mappings and token frequencies,
+    and supports incremental vocabulary growth from sentence-level inputs.
+    """
+
     def __init__(self, name):
+        """Initialize a language vocabulary with reserved symbols and variables.
+
+        Args:
+            name: Human-readable name of the language side (for example, `nl`
+                or `sparql`).
+        """
         self.name = name
         self.trimmed = False
         self.word2index = {"x1": 3, "x2": 4, "x3": 5, "x4": 6}
@@ -35,13 +49,24 @@ class Lang:
         self.n_words = 7  # Count default tokens
 
     def vocab_size(self):
+        """Return the number of indexed non-reserved tokens."""
         return len(self.word2index.keys())
 
     def index_words(self, sentence):
+        """Index each whitespace-delimited token in a sentence.
+
+        Args:
+            sentence: Input string to tokenize using simple space splitting.
+        """
         for word in sentence.split(' '):
             self.index_word(word)
 
     def index_word(self, word):
+        """Insert or update a single token in the vocabulary statistics.
+
+        Args:
+            word: Token string to add.
+        """
         if word not in self.word2index:
             self.word2index[word] = self.n_words
             self.word2count[word] = 1
@@ -52,6 +77,11 @@ class Lang:
 
     # Remove words below a certain count threshold
     def trim(self, min_count):
+        """Prune low-frequency words and rebuild indices.
+
+        Args:
+            min_count: Minimum token frequency required to keep a token.
+        """
         if self.trimmed: return
         self.trimmed = True
 
@@ -76,27 +106,48 @@ class Lang:
 
 
 def unicode_to_ascii(s):
+    """Normalize a Unicode string by removing diacritics.
+
+    Args:
+        s: Input text.
+
+    Returns:
+        ASCII-compatible representation of the input string.
+    """
     return ''.join(
         c for c in unicodedata.normalize('NFD', s)
         if unicodedata.category(c) != 'Mn'
     )
 
+
 def data_file_process(file):
+    """Read a TSV dataset file and normalize input/output strings."""
     with open(file, 'r') as f:
         lines = f.readlines()
         lines = [line.strip().lower().split('\t') for line in lines]
         lines_norm = []
         for line in lines:
-            input = line[0].strip(' .')
-            output = line[1].strip('"').replace('?', input.split(' ')[0].lower())
-            input_tokens = input.split()
+            input_text = line[0].strip(' .')
+            output = line[1].strip('"').replace('?', input_text.split(' ')[0].lower())
+            input_tokens = input_text.split()
             if len(input_tokens) <= 1:
                 continue
-            line_norm = [input, output]
+            line_norm = [input_text, output]
             lines_norm.append(line_norm)
     return lines_norm
 
+
 def read_data(lang1, lang2, task_name):
+    """Load all dataset splits for a task and create empty language objects.
+
+    Args:
+        lang1: Name of source language.
+        lang2: Name of target language.
+        task_name: Dataset identifier (`cogs` or `slog`).
+
+    Returns:
+        Tuple of language objects and split pairs in train/dev/test/gen order.
+    """
     print("Reading dataset from task {}...".format(task_name))
 
     file_train = f'{task_name}_data/train.tsv'
@@ -114,10 +165,32 @@ def read_data(lang1, lang2, task_name):
 
     return _input_lang, _output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen
 
+
+def load_token_list(file_path):
+    """Load one token per line from a preprocessing file."""
+    with open(file_path, 'r') as f:
+        return [line.strip("\n") for line in f]
+
 def prepare_dataset(lang1, lang2, task_name):
+    """Build dataset splits and vocabularies from task resources.
+
+    This function loads all data splits, indexes tokens from examples, and then
+    extends the target/source vocabularies with predefined preprocessing token
+    files required by the symbolic pipeline.
+
+    Args:
+        lang1: Source language name.
+        lang2: Target language name.
+        task_name: Dataset identifier (`cogs` or `slog`).
+
+    Returns:
+        Tuple of prepared language objects and split pairs.
+    """
     global input_lang
     global output_lang
-    assert task_name == "cogs" or task_name == "slog"
+    if task_name not in {"cogs", "slog"}:
+        raise ValueError(f"Unsupported task: {task_name}")
+
     print(f"Preparing dataset for task {task_name}...")
     input_lang, output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen = read_data(lang1, lang2, task_name)
 
@@ -126,32 +199,34 @@ def prepare_dataset(lang1, lang2, task_name):
         input_lang.index_words(pair[0])
         output_lang.index_words(pair[1])
 
-
     encode_token_filename = f'./{task_name}_data/preprocess/encode_tokens.txt'
-    with open(encode_token_filename, 'r') as f:
-        encode_tokens = f.readlines()
-        for encode_token in encode_tokens:
-            input_lang.index_word(encode_token.strip("\n"))
+    for encode_token in load_token_list(encode_token_filename):
+        input_lang.index_word(encode_token)
 
     decode_entity_filename = f'./{task_name}_data/preprocess/entity'
-    with open(decode_entity_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            output_lang.index_word(decode_token.strip("\n"))
+    for decode_token in load_token_list(decode_entity_filename):
+        output_lang.index_word(decode_token)
+
     decode_caus_predicate_filename = f'./{task_name}_data/preprocess/caus_predicate'
-    with open(decode_caus_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            output_lang.index_word(decode_token.strip("\n"))
+    for decode_token in load_token_list(decode_caus_predicate_filename):
+        output_lang.index_word(decode_token)
+
     decode_unac_predicate_filename = f'./{task_name}_data/preprocess/unac_predicate'
-    with open(decode_unac_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            output_lang.index_word(decode_token.strip("\n"))
+    for decode_token in load_token_list(decode_unac_predicate_filename):
+        output_lang.index_word(decode_token)
 
     return input_lang, output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen
 
 def get_bound_idx(pairs, length):
+    """Return the first index after examples whose input length is <= threshold.
+
+    Args:
+        pairs: Length-sorted `[input, output]` pair list.
+        length: Maximum input token length allowed.
+
+    Returns:
+        Index boundary suitable for slicing curriculum subsets.
+    """
     # Assume that pairs are already sorted.
     # Return the max index in pairs under certain length.
     # Warning: Will return empty when length is greater than max length in pairs.
@@ -163,12 +238,31 @@ def get_bound_idx(pairs, length):
             return index + 1
 
 def indexes_from_sentence(lang, sentence, type):
+    """Convert a tokenized sentence string into integer vocabulary indices.
+
+    Args:
+        lang: `Lang` object containing token mappings.
+        sentence: Whitespace-delimited text.
+        type: `input` to encode as-is, `output` to append EOS.
+
+    Returns:
+        List of token ids for the sentence.
+    """
     if type == 'input':
         return [lang.word2index[word] for word in sentence.split(' ')]
     if type == 'output':
         return [lang.word2index[word] for word in sentence.split(' ')] + [EOS_token]
 
 def make_path_preparations(args, run_mode):
+    """Seed randomness and initialize logger/checkpoint directories.
+
+    Args:
+        args: Parsed runtime arguments.
+        run_mode: `train` or `test`.
+
+    Returns:
+        Configured `Logger` instance for the current run.
+    """
     seed = args.random_seed
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -181,7 +275,8 @@ def make_path_preparations(args, run_mode):
 
         # "thesis-bucket-jcardonaruiz"
         #print(f"Creating logger at {args.train_logs_path} | checkpoint: {args.checkpoint}")
-        _logger = Logger(args.train_logs_path, args.checkpoint, cw_group = "thesis-train-logs")
+        #_logger = Logger(args.train_logs_path, args.checkpoint, cw_group = "thesis-train-logs")
+        _logger = Logger(args.train_logs_path, args.checkpoint, cw_group = None)
         #_logger = get_logger(f"{args.logs_path}.log")
         #print(f"{args.logs_path}.log")
         _logger.info(f"random seed: {seed}")
@@ -197,10 +292,22 @@ def make_path_preparations(args, run_mode):
             os.makedirs(log_dir)
         
         #print(f"Creating logger at {log_dir} | checkpoint: {checkpoint_name}")
-        _logger = Logger(log_dir, checkpoint_name, cw_group = "thesis-test-logs")
+        #_logger = Logger(log_dir, checkpoint_name, cw_group = "thesis-test-logs")
+        _logger = Logger(log_dir, checkpoint_name, cw_group =None)
     return _logger
 
 def prepare_optimisers(args, logger, high_parameters, low_parameters):
+    """Construct high-level and low-level optimizers from CLI settings.
+
+    Args:
+        args: Parsed runtime arguments.
+        logger: Logger handle (kept for interface compatibility).
+        high_parameters: Iterable of composer/encoder parameters.
+        low_parameters: Iterable of solver parameters.
+
+    Returns:
+        Dictionary with `high` and `low` optimizer instances.
+    """
     if args.high_optimizer == "adam":
         high_opt_class = torch.optim.Adam
     elif args.high_optimizer == "amsgrad":
@@ -225,6 +332,7 @@ def prepare_optimisers(args, logger, high_parameters, low_parameters):
     return optimizer
 
 def perform_high_optimizer_step(optimizer, model, args):
+    """Apply one optimization step to the high-level parameter group."""
     if args.clip_grad_norm > 0:
         nn.utils.clip_grad_norm_(parameters=model.get_high_parameters(),
                                  max_norm=args.clip_grad_norm,
@@ -234,6 +342,7 @@ def perform_high_optimizer_step(optimizer, model, args):
 
 
 def perform_low_optimizer_step(optimizer, model, args):
+    """Apply one optimization step to the low-level parameter group."""
     if args.clip_grad_norm > 0:
         nn.utils.clip_grad_norm_(parameters=model.get_low_parameters(),
                                  max_norm=args.clip_grad_norm,
@@ -242,6 +351,18 @@ def perform_low_optimizer_step(optimizer, model, args):
     optimizer["low"].zero_grad()
 
 def test(test_data, model, example2type, device, log_file=None):
+    """Evaluate a checkpoint on test examples and collect per-type accuracy.
+
+    Args:
+        test_data: Dataset examples.
+        model: Trained `HRLModel`.
+        example2type: Mapping from source sentence to category label.
+        device: Target device id (unused in current CPU-only path).
+        log_file: Optional output path for additional logs.
+
+    Returns:
+        Tuple `(overall_accuracy, type_right_count)`.
+    """
     loading_time_meter = AverageMeter()
     ce_loss_meter = AverageMeter()
     accuracy_meter = AverageMeter()
@@ -269,7 +390,7 @@ def test(test_data, model, example2type, device, log_file=None):
             if USE_CUDA:
                 tokens = tokens.cuda()
             # pdb.set_trace()
-            batch_forward_info, pred_chain, label_chain, state = model(test_data_example, tokens, 1, is_test=True)
+            batch_forward_info, pred_chain, label_chain, state, _ = model(test_data_example, tokens, 1, is_test=True)
 
             # pdb.set_trace()
             composer_rl_info, solver_rl_info = batch_forward_info[0]
@@ -313,6 +434,18 @@ def test(test_data, model, example2type, device, log_file=None):
 
 
 def validate(valid_data, model, epoch, device, logger):
+    """Run validation pass and report aggregate metrics.
+
+    Args:
+        valid_data: Validation examples.
+        model: Model instance to evaluate.
+        epoch: Current epoch index.
+        device: Device id (retained for interface compatibility).
+        logger: Logger used for metric emission.
+
+    Returns:
+        Mean validation accuracy for the pass.
+    """
     loading_time_meter = AverageMeter()
     batch_time_meter = AverageMeter()
     ce_loss_meter = AverageMeter()
@@ -344,7 +477,7 @@ def validate(valid_data, model, epoch, device, logger):
 
             # print('--' * 20)
             # print(valid_data_example[0])
-            batch_forward_info, pred_chain, label_chain, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
+            batch_forward_info, pred_chain, label_chain, _, _ = model(valid_data_example, tokens, 1, is_test=True, epoch=epoch)
             composer_rl_info, solver_rl_info = batch_forward_info[0]
 
             """
@@ -398,6 +531,23 @@ def validate(valid_data, model, epoch, device, logger):
 
 def train(train_data, valid_data, model, optimizer, epoch, args, logger,
           total_batch_num, data_len, regular_weight):
+    """Execute one training epoch with REINFORCE-style losses.
+
+    Args:
+        train_data: Training split examples.
+        valid_data: Validation split examples.
+        model: `HRLModel` under optimization.
+        optimizer: Dict containing `high` and `low` optimizers.
+        epoch: Zero-based epoch index.
+        args: Parsed CLI arguments.
+        logger: Training logger.
+        total_batch_num: Running counter across epochs.
+        data_len: Curriculum bucket identifier.
+        regular_weight: Regularization scalar (currently informational).
+
+    Returns:
+        Tuple `(val_accuracy, total_batch_num)` after this epoch.
+    """
     loading_time_meter = AverageMeter()
     batch_time_meter = AverageMeter()
     ce_loss_meter = AverageMeter()
@@ -450,7 +600,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         accuracy_samples = []
         rewards_all = []
 
-        sample_num = 15
+        sample_num = 10
 
         for example_idx in range(batch_size):
             train_pair = train_pairs[example_idx]
@@ -463,8 +613,10 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
             # pdb.set_trace()
             if USE_CUDA:
                 tokens = tokens.cuda()
-            batch_forward_info, pred_chain, label_chain, _ = \
+            batch_forward_info, pred_chain, label_chain, _, train_info = \
                 model(train_pair, tokens, sample_num, is_test=False, epoch=epoch)
+
+            logger.log_train(train_info)
 
             for forward_info in batch_forward_info:
                 composer_rl_info, solver_rl_info = forward_info
@@ -541,10 +693,10 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         global global_step
         global_step += 1
 
-        if batch_num <= 500:
+        if batch_num <= 250:
             val_num = batch_num
         else:
-            val_num = 500
+            val_num = 250
 
 
         print(f"Train: epoch: {epoch + 1} batch_idx: {batch_idx + 1}/{batch_num}", end='\r')
@@ -575,6 +727,16 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
     return val_accuracy, total_batch_num
 
 def get_alignment(alignment_filename, input_lang, output_lang):
+    """Load encoder-to-decoder lexical alignments from JSON.
+
+    Args:
+        alignment_filename: Path to alignment JSON file.
+        input_lang: Source vocabulary object.
+        output_lang: Target vocabulary object.
+
+    Returns:
+        Mapping from source token id to list of target token ids.
+    """
     with open(alignment_filename, 'r') as f:
         alignments = json.load(f)
 
@@ -591,6 +753,13 @@ def get_alignment(alignment_filename, input_lang, output_lang):
     return alignments_idx
 
 def train_model(args, task_name, logger):
+    """Create model/optimizer and run full training workflow.
+
+    Args:
+        args: Parsed training arguments.
+        task_name: Task identifier.
+        logger: Logger for progress and metrics.
+    """
     global input_lang
     global output_lang
 
@@ -614,26 +783,14 @@ def train_model(args, task_name, logger):
     alignment_filename = f'./{task_name}_data/preprocess/enct2dect'
     alignments_idx = get_alignment(alignment_filename, input_lang, output_lang)
 
-    entity_list = []
     entity_filename = f'./{task_name}_data/preprocess/entity'
-    with open(entity_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            entity_list.append(decode_token.strip("\n"))
+    entity_list = load_token_list(entity_filename)
 
-    caus_predicate_list = []
     caus_predicate_filename = f'./{task_name}_data/preprocess/caus_predicate'
-    with open(caus_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            caus_predicate_list.append(decode_token.strip("\n"))
+    caus_predicate_list = load_token_list(caus_predicate_filename)
 
-    unac_predicate_list = []
     unac_predicate_filename = f'./{task_name}_data/preprocess/unac_predicate'
-    with open(unac_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            unac_predicate_list.append(decode_token.strip("\n"))
+    unac_predicate_list = load_token_list(unac_predicate_filename)
 
     model = HRLModel(vocab_size=args.vocab_size,
                      word_dim=args.word_dim,
@@ -719,6 +876,13 @@ def train_model(args, task_name, logger):
 
 
 def test_model(args, task_name, logger):
+    """Load a checkpoint and evaluate it on the generalization split.
+
+    Args:
+        args: Parsed test arguments.
+        task_name: Task identifier.
+        logger: Logger for test metrics.
+    """
     global input_lang
     global output_lang
 
@@ -734,26 +898,14 @@ def test_model(args, task_name, logger):
     alignment_filename = f'./{task_name}_data/preprocess/enct2dect'
     alignments_idx = get_alignment(alignment_filename, input_lang, output_lang)
 
-    entity_list = []
     entity_filename = f'./{task_name}_data/preprocess/entity'
-    with open(entity_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            entity_list.append(decode_token.strip("\n"))
+    entity_list = load_token_list(entity_filename)
 
-    caus_predicate_list = []
     caus_predicate_filename = f'./{task_name}_data/preprocess/caus_predicate'
-    with open(caus_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            caus_predicate_list.append(decode_token.strip("\n"))
+    caus_predicate_list = load_token_list(caus_predicate_filename)
 
-    unac_predicate_list = []
     unac_predicate_filename = f'./{task_name}_data/preprocess/unac_predicate'
-    with open(unac_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            unac_predicate_list.append(decode_token.strip("\n"))
+    unac_predicate_list = load_token_list(unac_predicate_filename)
 
     example2type_file = f'./{task_name}_data/preprocess/example2type'
     with open(example2type_file, 'r') as f:
@@ -800,13 +952,22 @@ def test_model(args, task_name, logger):
 
 
 def prepare_arguments(checkpoint_folder, parser):
-    high_lr = 0.5   # 1.0
+    """Populate parser defaults and return fully parsed runtime arguments.
+
+    Args:
+        checkpoint_folder: Checkpoint directory name or path seed.
+        parser: `argparse.ArgumentParser` to enrich.
+
+    Returns:
+        Parsed namespace with all training/testing options.
+    """
+    high_lr = 0.5   # 1.0C
     low_lr = 0.05     # 0.1
     accumulate_batch_size = 8
     regular_weight = 1e-1   # 1e-1
     regular_decay_rate = 0.5
     simplicity_reward_rate = 0.5
-    hidden_size = 128
+    hidden_size = 256
     encode_mode = 'seq'
 
     args = {"word-dim": hidden_size,
@@ -815,7 +976,7 @@ def prepare_arguments(checkpoint_folder, parser):
             "composer-trans-hidden": hidden_size,
             "var-normalization": "True",
             "regular-weight": regular_weight,  # 0.0001
-            "clip-grad-norm": 0.5,
+            "clip-grad-norm": 0.3,
             "env-optimizer": "adadelta",  # adadelta
             "pol-optimizer": "adadelta",  # adadelta
             "high-lr": high_lr,  # 1.
@@ -824,7 +985,7 @@ def prepare_arguments(checkpoint_folder, parser):
             "l2-weight": 0.0001,
             "batch-size": 8,
             "accumulate-batch-size": accumulate_batch_size,
-            "max-epoch": 30,
+            "max-epoch": 1,
             "gpu-id": 0,
             "model-dir": "checkpoint/models/" + checkpoint_folder,
             "train-logs-path": "checkpoint/logs/train/" + checkpoint_folder,

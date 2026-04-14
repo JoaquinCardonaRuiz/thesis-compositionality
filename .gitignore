@@ -1,32 +1,29 @@
-LEAR/COGS_experiment/cogs_data
-LEAR/COGS_experiment/slog_data
-LEAR/COGS_experiment/checkpoint
-LEAR/COGS_experiment/__pycache__
-LEAR/COGS_experiment/modules/__pycache__
+models/COGS_experiment_forked/cogs_data
+models/COGS_experiment_forked/slog_data
+models/COGS_experiment_forked/checkpoint
+models/COGS_experiment_forked/__pycache__
+models/COGS_experiment_forked/modules/__pycache__
 
-LEAR/DeAR_experiment/cogs_data
-LEAR/DeAR_experiment/slog_data
-LEAR/DeAR_experiment/checkpoint
-LEAR/DeAR_experiment/__pycache__
-LEAR/DeAR_experiment/modules/__pycache__gh_token
+models/GPU_DeAR_deprecated/cogs_data
+models/GPU_DeAR_deprecated/slog_data
+models/GPU_DeAR_deprecated/checkpoint
+models/GPU_DeAR_deprecated/__pycache__
+models/GPU_DeAR_deprecated/modules/__pycache__gh_token
 
-LEAR/CPU_DeAR/checkpoint
-LEAR/CPU_DeAR/__pycache__
-LEAR/CPU_DeAR/modules/__pycache__
-LEAR/CPU_DeAR/cogs_data
-LEAR/CPU_DeAR/slog_data
+models/CPU_DeAR/checkpoint
+models/CPU_DeAR/__pycache__
+models/CPU_DeAR/modules/__pycache__
+models/CPU_DeAR/cogs_data
+models/CPU_DeAR/slog_data
 
 
-ACL/finetune_llama/data/*
-ACL/train_transformer/data/*
-ACL/finetune_llama/logs/*
-ACL/sparsity_test/*.tsv
-LEAR\Temp
+analysis/finetune_llama/data/*
+analysis/train_transformer/data/*
+analysis/finetune_llama/logs/*
+analysis/sparsity_test/*.tsv
 
 pred_visualiser/input_tsvs
 
-test.py
-test_results.txt
-LEAR/DeAR_experiment/modules/__pycache__/*
+models/GPU_DeAR_deprecated/modules/__pycache__/*
 .vscode/sessions.json
 aws.creds
